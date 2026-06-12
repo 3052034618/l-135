@@ -19,6 +19,8 @@ class MaskConfig:
     min_confidence: float = 0.6
     source_file: Optional[str] = None
     draft_source: Optional[str] = None
+    skipped_fields: List[str] = field(default_factory=list)
+    draft_field_meta: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, filepath: Optional[str] = None) -> "MaskConfig":
@@ -28,13 +30,22 @@ class MaskConfig:
                     data = json.load(f)
                 raw_field_overrides = data.get("field_overrides", {}) or {}
                 cleaned_field_overrides: Dict[str, Dict[str, Any]] = {}
+                skipped: List[str] = []
+                field_meta: Dict[str, Dict[str, Any]] = {}
+
                 for fname, entry in raw_field_overrides.items():
                     if not isinstance(entry, dict):
                         continue
                     status = entry.get("status", "CUSTOM")
                     has_explicit = "sens_type" in entry or "strategy" in entry
+                    meta = {"status": status}
+                    for k in ("detected_type", "suggestion", "#说明", "#提示", "#识别说明", "#示例值"):
+                        if k in entry:
+                            meta[k] = entry[k]
+                    field_meta[fname] = meta
 
                     if status == "SKIP_NON_SENSITIVE" and not has_explicit:
+                        skipped.append(fname)
                         continue
                     if status == "NEED_MANUAL" and not has_explicit:
                         continue
@@ -52,6 +63,8 @@ class MaskConfig:
 
                     if effective:
                         cleaned_field_overrides[fname] = effective
+                    elif has_explicit:
+                        cleaned_field_overrides[fname] = {"sens_type": effective.get("sens_type", "FIELD")}
 
                 cfg = cls(
                     type_rules=data.get("type_rules", {}),
@@ -59,7 +72,9 @@ class MaskConfig:
                     whitelist_fields=list(data.get("whitelist_fields", []) or []),
                     min_confidence=float(data.get("min_confidence", 0.6)),
                     source_file=filepath,
-                    draft_source=filepath if "source_file" in data or "status" in str(raw_field_overrides)[:200] else None,
+                    draft_source=filepath if bool(field_meta) else None,
+                    skipped_fields=skipped,
+                    draft_field_meta=field_meta,
                 )
                 return cfg
             except (json.JSONDecodeError, KeyError, TypeError) as e:
@@ -203,6 +218,208 @@ class MaskConfig:
             )
 
         return MaskEngine(rules=rules, field_overrides=field_rules)
+
+    def validate(self) -> Dict[str, Any]:
+        """校验配置的合法性，返回校验结果
+
+        Returns:
+            {
+                "valid": bool,               # 是否整体通过（无 error 级问题）
+                "issues": [...],             # 问题清单
+                "stats": {                   # 统计
+                    "type_rules_total": int,
+                    "type_rules_ok": int,
+                    "field_overrides_total": int,
+                    "fields_ok": int,
+                    "fields_warning": int,
+                    "fields_error": int,
+                    "fields_skipped": int,
+                    "fields_need_manual": int,
+                    "whitelist_count": int,
+                    "whitelist_conflicts": int,
+                },
+                "field_status": {fname: status, ...},
+            }
+        """
+        from .detector import SENSITIVE_TYPES
+
+        issues: List[Dict[str, Any]] = []
+        field_status: Dict[str, str] = {}
+        valid_sens_types = set(SENSITIVE_TYPES.keys())
+        valid_strategies = {"retain", "replace", "random"}
+
+        type_rules_ok = 0
+        for stype, rule in self.type_rules.items():
+            clean = {k: v for k, v in rule.items() if not str(k).startswith("#")}
+            has_issue = False
+            if stype not in valid_sens_types:
+                issues.append({
+                    "level": "warning",
+                    "field": f"type_rules.{stype}",
+                    "category": "sens_type",
+                    "message": f"敏感类型 '{stype}' 不在标准类型列表中",
+                })
+                has_issue = True
+            strategy = clean.get("strategy", "retain")
+            if strategy not in valid_strategies:
+                issues.append({
+                    "level": "error",
+                    "field": f"type_rules.{stype}",
+                    "category": "strategy",
+                    "message": f"策略 '{strategy}' 不合法，支持: retain/replace/random",
+                })
+                has_issue = True
+            if strategy == "retain":
+                ks = clean.get("keep_start", 3)
+                ke = clean.get("keep_end", 4)
+                try:
+                    int(ks); int(ke)
+                except (TypeError, ValueError):
+                    issues.append({
+                        "level": "error",
+                        "field": f"type_rules.{stype}",
+                        "category": "params",
+                        "message": "retain 策略要求 keep_start/keep_end 为整数",
+                    })
+                    has_issue = True
+            if not has_issue:
+                type_rules_ok += 1
+
+        whitelist_set = set(self.whitelist_fields)
+
+        fields_ok = 0
+        fields_warning = 0
+        fields_error = 0
+        fields_skipped = 0
+        fields_need_manual = 0
+        whitelist_conflicts = 0
+
+        for fname in self.skipped_fields:
+            field_status[fname] = "SKIPPED"
+            fields_skipped += 1
+            if fname in whitelist_set:
+                whitelist_conflicts += 1
+                issues.append({
+                    "level": "info",
+                    "field": fname,
+                    "category": "conflict",
+                    "message": "字段同时在白名单和跳过列表中（不冲突，仅提示）",
+                })
+
+        for fname, meta in self.draft_field_meta.items():
+            if fname in field_status:
+                continue
+            status = meta.get("status", "CUSTOM")
+            if status == "NEED_MANUAL":
+                field_status[fname] = "NEED_MANUAL"
+                fields_need_manual += 1
+                issues.append({
+                    "level": "warning",
+                    "field": fname,
+                    "category": "manual",
+                    "message": meta.get("#提示") or meta.get("suggestion") or "该字段需要人工补充 sens_type 后才能使用",
+                })
+
+        for fname, rule in self.field_overrides.items():
+            level = "ok"
+            stype = rule.get("sens_type")
+            strategy = rule.get("strategy")
+            has_error = False
+            has_warning = False
+
+            if not stype:
+                issues.append({
+                    "level": "error",
+                    "field": fname,
+                    "category": "sens_type",
+                    "message": "缺少 sens_type 配置",
+                })
+                has_error = True
+            elif stype not in valid_sens_types and stype != "FIELD":
+                issues.append({
+                    "level": "warning",
+                    "field": fname,
+                    "category": "sens_type",
+                    "message": f"sens_type '{stype}' 不在标准类型列表中",
+                })
+                has_warning = True
+
+            if strategy and strategy not in valid_strategies:
+                issues.append({
+                    "level": "error",
+                    "field": fname,
+                    "category": "strategy",
+                    "message": f"策略 '{strategy}' 不合法",
+                })
+                has_error = True
+
+            if strategy == "retain":
+                ks = rule.get("keep_start")
+                ke = rule.get("keep_end")
+                if ks is not None:
+                    try:
+                        int(ks)
+                    except (TypeError, ValueError):
+                        issues.append({
+                            "level": "error",
+                            "field": fname,
+                            "category": "params",
+                            "message": "keep_start 必须为整数",
+                        })
+                        has_error = True
+                if ke is not None:
+                    try:
+                        int(ke)
+                    except (TypeError, ValueError):
+                        issues.append({
+                            "level": "error",
+                            "field": fname,
+                            "category": "params",
+                            "message": "keep_end 必须为整数",
+                        })
+                        has_error = True
+
+            if fname in whitelist_set:
+                whitelist_conflicts += 1
+                issues.append({
+                    "level": "warning",
+                    "field": fname,
+                    "category": "conflict",
+                    "message": "字段同时在白名单和 field_overrides 中，白名单优先级更高将跳过处理",
+                })
+                has_warning = True
+
+            if has_error:
+                field_status[fname] = "ERROR"
+                fields_error += 1
+            elif has_warning:
+                field_status[fname] = "WARNING"
+                fields_warning += 1
+            else:
+                field_status[fname] = "OK"
+                fields_ok += 1
+
+        valid = not any(i["level"] == "error" for i in issues)
+
+        stats = {
+            "type_rules_total": len(self.type_rules),
+            "type_rules_ok": type_rules_ok,
+            "field_overrides_total": len(self.field_overrides) + len(self.skipped_fields) + fields_need_manual,
+            "fields_ok": fields_ok,
+            "fields_warning": fields_warning,
+            "fields_error": fields_error,
+            "fields_skipped": fields_skipped,
+            "fields_need_manual": fields_need_manual,
+            "whitelist_count": len(self.whitelist_fields),
+            "whitelist_conflicts": whitelist_conflicts,
+        }
+
+        return {
+            "valid": valid,
+            "issues": issues,
+            "stats": stats,
+            "field_status": field_status,
+        }
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

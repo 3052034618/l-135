@@ -39,13 +39,15 @@ class DataProcessor:
     def __init__(self, config: MaskConfig,
                  strategy_overrides: Optional[Dict[str, str]] = None,
                  extra_whitelist: Optional[List[str]] = None,
-                 min_confidence: Optional[float] = None):
+                 min_confidence: Optional[float] = None,
+                 strict_draft: bool = False):
         self.config = config
         self.min_conf = min_confidence if min_confidence is not None else config.min_confidence
         self.whitelist = list(config.whitelist_fields)
         if extra_whitelist:
             self.whitelist.extend(extra_whitelist)
         self.engine = config.build_mask_engine(strategy_overrides)
+        self.strict_draft = strict_draft
 
     def _infer_field_types_across_file(
         self, data: DataFile, stat: FileProcessStat
@@ -103,16 +105,138 @@ class DataProcessor:
 
         return final_types
 
+    def _resolve_confirmed_field_types(
+        self, inferred_types: Dict[str, str], data: DataFile
+    ) -> Dict[str, str]:
+        """应用配置覆盖，得到最终确认的字段类型
+
+        规则：
+        1. config.field_overrides 中有 sens_type 的字段 → 手工确认，优先级最高
+        2. 自动推断的字段 → 保留，除非被草稿跳过
+        3. strict_draft 模式下：草稿中 status=SKIP_NON_SENSITIVE / NEED_MANUAL 的字段，
+           即使被自动识别也移除（只保留 AUTO_OK 和 手工配置）
+        4. 白名单字段始终不包含
+        """
+        confirmed: Dict[str, str] = {}
+        for fname, stype in inferred_types.items():
+            if fname in self.whitelist:
+                continue
+            confirmed[fname] = stype
+
+        for fname, rule in self.config.field_overrides.items():
+            if fname in self.whitelist:
+                continue
+            stype = rule.get("sens_type")
+            if stype:
+                confirmed[fname] = stype
+
+        if self.strict_draft and self.config.draft_source:
+            meta = self.config.draft_field_meta
+            to_remove = []
+            for fname in list(confirmed.keys()):
+                if fname in self.config.field_overrides:
+                    continue
+                if fname in meta:
+                    status = meta[fname].get("status", "AUTO_OK")
+                    if status in ("SKIP_NON_SENSITIVE", "NEED_MANUAL"):
+                        to_remove.append(fname)
+                elif fname in self.config.skipped_fields:
+                    to_remove.append(fname)
+            for fname in to_remove:
+                confirmed.pop(fname, None)
+
+        return confirmed
+
+    def _adjust_stats_for_confirmed_fields(
+        self, data: DataFile, stat: FileProcessStat,
+        confirmed_types: Dict[str, str],
+    ) -> None:
+        """根据确认后的字段类型，调整统计数据
+
+        - 已手工配置的字段：如果 detect 没命中，按非空记录数补命中
+        - strict_draft 模式下：被排除的字段，从统计中减去
+        - 从 unknown_format_fields 中移除已确认 + 已跳过的字段
+        """
+        confirmed_set = set(confirmed_types.keys())
+
+        skipped_set = set()
+        if self.config.draft_field_meta:
+            for fname, meta in self.config.draft_field_meta.items():
+                if meta.get("status") == "SKIP_NON_SENSITIVE":
+                    skipped_set.add(fname)
+        skipped_set.update(self.config.skipped_fields)
+
+        stat.unknown_format_fields = [
+            item for item in stat.unknown_format_fields
+            if item["field"] not in confirmed_set and item["field"] not in skipped_set
+        ]
+
+        for fname, stype in confirmed_types.items():
+            if fname in self.config.field_overrides:
+                non_empty = 0
+                for rec in data.records:
+                    v = rec.get(fname)
+                    if v is not None and str(v).strip():
+                        non_empty += 1
+                current = stat.sensitive_fields.get(fname, 0)
+                if non_empty > current:
+                    delta = non_empty - current
+                    stat.sensitive_fields[fname] = non_empty
+                    stat.sens_type_counts[stype] += delta
+
+        if self.strict_draft and self.config.draft_source:
+            removed_sens: Counter = Counter()
+            removed_fields: Counter = Counter()
+            removed_records = 0
+
+            inferred_only = set()
+            for fname in list(stat.sensitive_fields.keys()):
+                if fname not in confirmed_types and fname not in self.whitelist:
+                    inferred_only.add(fname)
+
+            for fname in inferred_only:
+                cnt = stat.sensitive_fields.pop(fname, 0)
+                if cnt <= 0:
+                    continue
+                removed_fields[fname] = cnt
+                for st in list(stat.sens_type_counts.keys()):
+                    pass
+
+            original_sens = dict(stat.sens_type_counts)
+            stat.sens_type_counts = Counter()
+            for fname, stype in confirmed_types.items():
+                cnt = stat.sensitive_fields.get(fname, 0)
+                if cnt > 0:
+                    stat.sens_type_counts[stype] += cnt
+
+            records_with_sensitive = 0
+            for rec in data.records:
+                has_sens = False
+                for fname in confirmed_types:
+                    v = rec.get(fname)
+                    if v is None or not str(v).strip():
+                        continue
+                    if fname in self.config.field_overrides:
+                        has_sens = True
+                        break
+                    best = detect_value_best(v, fname, self.min_conf)
+                    if best and best.sens_type == confirmed_types.get(fname):
+                        has_sens = True
+                        break
+                if has_sens:
+                    records_with_sensitive += 1
+            stat.records_with_sensitive = records_with_sensitive
+
     def scan_file(self, filepath: str,
                   progress_cb: Optional[Callable] = None) -> Tuple[DataFile, Dict[str, str], FileProcessStat]:
-        """扫描单个文件 - 类型推断（抽样）+ 全量精确计数（每字段最佳命中）"""
+        """扫描单个文件 - 类型推断（抽样）+ 全量精确计数（每字段最佳命中）+ 配置覆盖合并"""
         stat = FileProcessStat(filepath=filepath)
         data = read_file(filepath)
         stat.format = data.format
         stat.total_records = data.total_records
         stat.total_fields = len(data.fields)
 
-        field_sens_types = self._infer_field_types_across_file(data, stat)
+        inferred_types = self._infer_field_types_across_file(data, stat)
 
         for idx, record in enumerate(data.records):
             result = detect_record(record, self.whitelist, self.min_conf)
@@ -125,7 +249,10 @@ class DataProcessor:
             if progress_cb:
                 progress_cb("scan", filepath, idx, data.total_records)
 
-        return data, field_sens_types, stat
+        confirmed_types = self._resolve_confirmed_field_types(inferred_types, data)
+        self._adjust_stats_for_confirmed_fields(data, stat, confirmed_types)
+
+        return data, confirmed_types, stat
 
     def mask_file(self, data: DataFile, field_sens_types: Dict[str, str],
                   stat: FileProcessStat,
@@ -225,6 +352,169 @@ class DataProcessor:
                     "risk": mr.risk_level,
                 })
         return buckets
+
+    def _build_field_audit(
+        self, data: DataFile, field_types: Dict[str, str], stat: FileProcessStat
+    ) -> List[Dict[str, Any]]:
+        """构建字段级审计明细列表
+
+        Returns:
+            [{
+                "field": "name",
+                "sens_type": "NAME",
+                "strategy": "retain",
+                "hit_count": 100,
+                "masked_count": 100,
+                "sample_original": "张三",
+                "sample_masked": "张*",
+                "source": "auto" / "manual" / "unknown" / "whitelist",
+                "status": "CONFIRMED" / "AUTO_OK" / "NEED_MANUAL" / "SKIPPED" / "WHITELIST",
+            }, ...]
+        """
+        audit: List[Dict[str, Any]] = []
+        seen_fields: Set[str] = set()
+
+        details_map: Dict[str, Any] = {}
+        sample_record = None
+        for rec in data.records:
+            if rec:
+                sample_record = rec
+                break
+
+        if sample_record:
+            details = self.engine.mask_record_with_details(
+                sample_record, field_types, self.whitelist
+            )
+            details_map = details
+
+        all_fields = set(data.fields)
+
+        manual_fields = set(self.config.field_overrides.keys())
+        skip_fields = set(self.config.skipped_fields)
+        meta = self.config.draft_field_meta
+
+        for fname in data.fields:
+            if fname in seen_fields:
+                continue
+            seen_fields.add(fname)
+
+            if fname in self.whitelist:
+                audit.append({
+                    "field": fname,
+                    "sens_type": "-",
+                    "strategy": "-",
+                    "hit_count": 0,
+                    "masked_count": 0,
+                    "sample_original": self._first_sample(data, fname),
+                    "sample_masked": self._first_sample(data, fname),
+                    "source": "whitelist",
+                    "status": "WHITELIST",
+                })
+                continue
+
+            field_meta = meta.get(fname, {})
+            meta_status = field_meta.get("status", "")
+
+            if (fname in skip_fields or meta_status == "SKIP_NON_SENSITIVE") and fname not in self.config.field_overrides:
+                audit.append({
+                    "field": fname,
+                    "sens_type": "-",
+                    "strategy": "-",
+                    "hit_count": 0,
+                    "masked_count": 0,
+                    "sample_original": self._first_sample(data, fname),
+                    "sample_masked": self._first_sample(data, fname),
+                    "source": "skip",
+                    "status": "SKIPPED",
+                })
+                continue
+
+            stype = field_types.get(fname, "")
+            hit_count = stat.sensitive_fields.get(fname, 0)
+            masked_count = hit_count
+            strategy = "-"
+            sample_orig = self._first_sample(data, fname)
+            sample_masked = sample_orig
+
+            detail = details_map.get(fname)
+            if detail and detail.changed:
+                sample_orig = str(detail.original) if detail.original is not None else ""
+                sample_masked = str(detail.masked) if detail.masked is not None else ""
+                rule_used = detail.rule_used or ""
+                if rule_used and rule_used.startswith("field:"):
+                    rule_name = rule_used[len("field:"):]
+                    type_rule = self.engine.rules.get(stype)
+                    if type_rule:
+                        strategy = type_rule.strategy
+                    else:
+                        strategy = rule_name
+                else:
+                    strategy = rule_used
+            elif stype:
+                rule = self.engine.rules.get(stype)
+                if rule:
+                    strategy = rule.strategy
+
+            has_manual_config = False
+            if self.config.draft_field_meta and fname in self.config.draft_field_meta:
+                pass
+            elif fname in self.config.field_overrides:
+                has_manual_config = True
+
+            if meta_status == "CONFIRMED_MANUAL" or has_manual_config:
+                source = "manual"
+                status = "CONFIRMED"
+            elif meta_status == "AUTO_OK":
+                source = "auto"
+                status = "AUTO_OK"
+            elif meta_status == "SKIP_NON_SENSITIVE":
+                source = "skip"
+                status = "SKIPPED"
+            elif meta_status == "NEED_MANUAL":
+                source = "unknown"
+                status = "NEED_MANUAL"
+            elif stype:
+                source = "auto"
+                status = "AUTO_OK"
+            else:
+                source = "unknown"
+                status = "UNKNOWN"
+
+            if status == "SKIPPED" and not stype:
+                audit.append({
+                    "field": fname,
+                    "sens_type": "-",
+                    "strategy": "-",
+                    "hit_count": 0,
+                    "masked_count": 0,
+                    "sample_original": sample_orig,
+                    "sample_masked": sample_orig,
+                    "source": "skip",
+                    "status": "SKIPPED",
+                })
+                continue
+
+            audit.append({
+                "field": fname,
+                "sens_type": stype or "-",
+                "strategy": strategy,
+                "hit_count": hit_count,
+                "masked_count": masked_count,
+                "sample_original": sample_orig,
+                "sample_masked": sample_masked,
+                "source": source,
+                "status": status,
+            })
+
+        return audit
+
+    def _first_sample(self, data: DataFile, field: str) -> str:
+        """取字段的第一个非空样本值"""
+        for rec in data.records:
+            v = rec.get(field)
+            if v is not None and str(v).strip():
+                return str(v)[:80]
+        return ""
 
     def build_rule_draft(
         self,
@@ -385,6 +675,8 @@ class DataProcessor:
                 file_stat = scan_stat
                 file_stat.format = data.format
 
+                file_stat.field_audit = self._build_field_audit(data, field_types, file_stat)
+
                 if operation == "scan":
                     file_stat.output_status = "SCAN_OK"
                     report.files.append(file_stat)
@@ -479,11 +771,17 @@ class DataProcessor:
                     md_report=md_report_path, json_report=json_report_path,
                 )
 
+        audit_detail_path = ""
+        if report_dir:
+            audit_detail_path = os.path.join(report_dir, f"audit_detail_{task_stamp}.md")
+            ReportGenerator.generate_audit_detail(report, audit_detail_path)
+
         report.extra_outputs = {
             "report_dir": report_dir,
             "md_report": md_report_path,
             "json_report": json_report_path,
             "task_summary": summary_path,
+            "audit_detail": audit_detail_path,
             "task_id": task_stamp,
         }
 

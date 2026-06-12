@@ -117,6 +117,8 @@ def _print_extra_outputs(extra: dict):
         ("report_md", "检查报告 (Markdown)"),
         ("json_report", "检查报告 (JSON)"),
         ("report_json", "检查报告 (JSON)"),
+        ("audit_detail", "审计明细表 (Markdown)"),
+        ("audit_detail_md", "审计明细表 (Markdown)"),
         ("rule_draft", "规则草稿文件"),
     ]
     rows = []
@@ -166,7 +168,9 @@ def cli():
               help="白名单字段，可多次指定，扫描时跳过")
 @click.option("--json-output", is_flag=True, default=False,
               help="以JSON格式输出扫描结果")
-def scan_cmd(input_path, config_path, recursive, min_confidence, whitelist, json_output):
+@click.option("--strict-draft", is_flag=True, default=False,
+              help="严格草稿模式：仅处理草稿中 AUTO_OK 或手工配置的字段，SKIP/NEED_MANUAL 即使被自动识别也跳过")
+def scan_cmd(input_path, config_path, recursive, min_confidence, whitelist, json_output, strict_draft):
     """扫描识别文件中的敏感内容
 
     扫描输入文件或文件夹，识别其中的手机号、证件号、地址、姓名、企业名称等敏感内容，
@@ -175,7 +179,7 @@ def scan_cmd(input_path, config_path, recursive, min_confidence, whitelist, json
     _print_banner()
     config = _load_config(config_path)
     strategy_overrides = {}
-    processor = DataProcessor(config, strategy_overrides, list(whitelist), min_confidence)
+    processor = DataProcessor(config, strategy_overrides, list(whitelist), min_confidence, strict_draft=strict_draft)
 
     input_abs = os.path.abspath(input_path)
     if not os.path.exists(input_abs):
@@ -283,8 +287,10 @@ def scan_cmd(input_path, config_path, recursive, min_confidence, whitelist, json
               help="仅处理不写入文件，用于预检查")
 @click.option("--no-report", is_flag=True, default=False,
               help="不生成报告文件")
+@click.option("--strict-draft", is_flag=True, default=False,
+              help="严格草稿模式：仅处理草稿中 AUTO_OK 或手工配置的字段")
 def mask_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
-             min_confidence, whitelist, dry_run, no_report):
+             min_confidence, whitelist, dry_run, no_report, strict_draft):
     """按规则脱敏处理文件并输出到指定目录
 
     批量处理输入文件，按保留位数、替换字符或随机映射方式脱敏敏感内容，
@@ -293,7 +299,7 @@ def mask_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
     _print_banner()
     config = _load_config(config_path)
     overrides = _parse_strategy_overrides(strategy_opts)
-    processor = DataProcessor(config, overrides, list(whitelist), min_confidence)
+    processor = DataProcessor(config, overrides, list(whitelist), min_confidence, strict_draft=strict_draft)
 
     input_abs = os.path.abspath(input_path)
     if not os.path.exists(input_abs):
@@ -383,8 +389,10 @@ def mask_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
               help="预览模式: rows=前N行逐列对比; by-type=按敏感类型汇总抽样")
 @click.option("--per-type", "per_type", type=int, default=5, show_default=True,
               help="by-type 模式下每种敏感类型最多抽样条数")
+@click.option("--strict-draft", is_flag=True, default=False,
+              help="严格草稿模式：仅处理草稿中 AUTO_OK 或手工配置的字段")
 def preview_cmd(input_path, config_path, recursive, strategy_opts,
-                min_confidence, whitelist, rows, preview_mode, per_type):
+                min_confidence, whitelist, rows, preview_mode, per_type, strict_draft):
     """展示脱敏前后的对比预览
 
     两种预览模式：
@@ -395,7 +403,7 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
     _print_banner()
     config = _load_config(config_path)
     overrides = _parse_strategy_overrides(strategy_opts)
-    processor = DataProcessor(config, overrides, list(whitelist), min_confidence)
+    processor = DataProcessor(config, overrides, list(whitelist), min_confidence, strict_draft=strict_draft)
 
     input_abs = os.path.abspath(input_path)
     if not os.path.exists(input_abs):
@@ -558,8 +566,10 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
 @click.option("--format", "report_format",
               type=click.Choice(["all", "markdown", "json", "both"]),
               default="both", show_default=True, help="报告输出格式")
+@click.option("--strict-draft", is_flag=True, default=False,
+              help="严格草稿模式：仅处理草稿中 AUTO_OK 或手工配置的字段")
 def report_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
-               min_confidence, whitelist, report_format):
+               min_confidence, whitelist, report_format, strict_draft):
     """生成完整的处理检查报告（不写入脱敏文件）
 
     对输入数据执行完整扫描检查，生成包含处理数量、敏感类型分布、
@@ -568,7 +578,7 @@ def report_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
     _print_banner()
     config = _load_config(config_path)
     overrides = _parse_strategy_overrides(strategy_opts)
-    processor = DataProcessor(config, overrides, list(whitelist), min_confidence)
+    processor = DataProcessor(config, overrides, list(whitelist), min_confidence, strict_draft=strict_draft)
 
     input_abs = os.path.abspath(input_path)
     if not os.path.exists(input_abs):
@@ -783,6 +793,130 @@ def rules_draft_cmd(input_path, output_path, config_path, recursive, min_confide
     click.echo(_c("   2. 根据业务需要修改各字段的 strategy / keep_start / keep_end 等", Fore.LIGHTBLACK_EX))
     click.echo(_c("   3. 确认无误后： python main.py preview -i 输入 -c 草稿 --mode by-type", Fore.LIGHTBLACK_EX))
     click.echo(_c("   4. 最终执行： python main.py mask -i 输入 -o 输出 -c 草稿", Fore.LIGHTBLACK_EX))
+
+
+@rules_cmd.command("validate")
+@click.option("-c", "--config", "config_path", required=True, type=click.Path(),
+              help="待校验的规则配置/草稿文件 (JSON)")
+@click.option("--json-output", is_flag=True, default=False,
+              help="以JSON格式输出校验结果")
+def rules_validate_cmd(config_path, json_output):
+    """校验规则配置/草稿的合法性
+
+    检查内容：
+    • sens_type 是否为标准类型
+    • strategy 策略是否合法、参数是否完整
+    • 白名单与字段规则是否冲突
+    • 草稿中需要人工补充的字段
+
+    输出分类：
+    ✅ 可直接使用 / ⚠️ 有警告 / ❌ 有错误 / ⏭️  已跳过 / 📝 待人工补充
+    """
+    _print_banner()
+    config = _load_config(config_path)
+    result = config.validate()
+
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        if not result["valid"]:
+            sys.exit(1)
+        return
+
+    stats = result["stats"]
+    click.echo(_c("🔍 规则校验", Fore.GREEN))
+    click.echo(f"   配置文件: {_c(config_path, Fore.CYAN)}")
+    click.echo()
+
+    overall_status = _c("✅ 通过", Fore.GREEN) if result["valid"] else _c("❌ 存在错误", Fore.RED)
+    click.echo(_c("─" * 50, Fore.CYAN))
+    click.echo(f"   整体结论: {overall_status}")
+    click.echo()
+
+    click.echo(_c("📊 统计概览:", Fore.LIGHTMAGENTA_EX))
+    click.echo(f"   类型规则 (type_rules)    : {stats['type_rules_ok']}/{stats['type_rules_total']} 有效")
+    click.echo(f"   字段规则总数              : {stats['field_overrides_total']}")
+    click.echo(f"   ✅ 可直接使用              : {_c(str(stats['fields_ok']), Fore.GREEN)}")
+    click.echo(f"   ⚠️  有警告                  : {_c(str(stats['fields_warning']), Fore.YELLOW)}")
+    if stats['fields_error']:
+        click.echo(f"   ❌ 有错误                  : {_c(str(stats['fields_error']), Fore.RED)}")
+    click.echo(f"   ⏭️  已跳过 (SKIP)           : {_c(str(stats['fields_skipped']), Fore.LIGHTBLACK_EX)}")
+    click.echo(f"   📝 待人工补充 (NEED_MANUAL): {_c(str(stats['fields_need_manual']), Fore.LIGHTYELLOW_EX)}")
+    click.echo(f"   白名单字段                : {stats['whitelist_count']}")
+    if stats['whitelist_conflicts']:
+        click.echo(f"   ⚠️  白名单冲突              : {_c(str(stats['whitelist_conflicts']), Fore.YELLOW)}")
+    click.echo()
+
+    field_status = result["field_status"]
+    if field_status:
+        click.echo(_c("📋 字段状态明细:", Fore.LIGHTMAGENTA_EX))
+        rows = []
+        status_colors = {
+            "OK": Fore.GREEN,
+            "WARNING": Fore.YELLOW,
+            "ERROR": Fore.RED,
+            "SKIPPED": Fore.LIGHTBLACK_EX,
+            "NEED_MANUAL": Fore.LIGHTYELLOW_EX,
+        }
+        status_labels = {
+            "OK": "✅ 可用",
+            "WARNING": "⚠️  警告",
+            "ERROR": "❌ 错误",
+            "SKIPPED": "⏭️  跳过",
+            "NEED_MANUAL": "📝 待补充",
+        }
+        meta = config.draft_field_meta
+        for fname in sorted(field_status.keys()):
+            st = field_status[fname]
+            stype = ""
+            if fname in config.field_overrides:
+                stype = config.field_overrides[fname].get("sens_type", "")
+            elif fname in meta:
+                stype = str(meta[fname].get("detected_type") or "")
+            label = status_labels.get(st, st)
+            color = status_colors.get(st, Fore.WHITE)
+            rows.append([
+                _c(label, color),
+                fname,
+                stype or "-",
+            ])
+        click.echo(tabulate(rows, headers=["状态", "字段名", "敏感类型"],
+                            tablefmt="simple", stralign="left"))
+        click.echo()
+
+    issues = result["issues"]
+    if issues:
+        click.echo(_c("🔔 问题清单:", Fore.LIGHTMAGENTA_EX))
+        level_order = ["error", "warning", "info"]
+        level_labels = {"error": "❌", "warning": "⚠️", "info": "ℹ️"}
+        level_colors = {"error": Fore.RED, "warning": Fore.YELLOW, "info": Fore.LIGHTBLACK_EX}
+        for level in level_order:
+            level_issues = [i for i in issues if i["level"] == level]
+            if not level_issues:
+                continue
+            for iss in level_issues[:20]:
+                icon = level_labels.get(level, "")
+                color = level_colors.get(level, Fore.WHITE)
+                msg = iss["message"]
+                field = iss.get("field", "")
+                category = iss.get("category", "")
+                prefix = f"   {icon} [{category}] {field}" if field else f"   {icon} [{category}]"
+                click.echo(_c(prefix, color))
+                click.echo(_c(f"      {msg}", Fore.LIGHTBLACK_EX))
+            if len(level_issues) > 20:
+                click.echo(_c(f"   ... 还有 {len(level_issues) - 20} 条同级别问题", Fore.LIGHTBLACK_EX))
+        click.echo()
+
+    click.echo(_c("💡 操作建议:", Fore.LIGHTYELLOW_EX))
+    if not result["valid"]:
+        click.echo(_c("   存在错误项，请先修复 ❌ 标记的字段后再使用", Fore.LIGHTBLACK_EX))
+    elif stats["fields_need_manual"] > 0:
+        click.echo(_c("   有字段需要人工确认，请补充 NEED_MANUAL 字段的 sens_type", Fore.LIGHTBLACK_EX))
+    else:
+        click.echo(_c("   配置校验通过，可直接用于 scan/preview/mask/report", Fore.LIGHTBLACK_EX))
+    click.echo()
+
+    if not result["valid"]:
+        sys.exit(1)
 
 
 def main():

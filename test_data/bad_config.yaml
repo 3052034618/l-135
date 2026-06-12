@@ -1,0 +1,39 @@
+{
+  "#规则草稿说明": "测试用：包含各种错误的配置",
+  "type_rules": {
+    "PHONE": {
+      "strategy": "retain",
+      "mask_char": "*",
+      "keep_start": 3,
+      "keep_end": 4
+    }
+  },
+  "field_overrides": {
+    "bad_type_field": {
+      "sens_type": "INVALID_TYPE",
+      "status": "CONFIRMED_MANUAL",
+      "#说明": "sens_type 写错了"
+    },
+    "missing_params_field": {
+      "sens_type": "PHONE",
+      "strategy": "retain",
+      "status": "CONFIRMED_MANUAL",
+      "#说明": "策略参数缺失，retain 需要 keep_start/keep_end"
+    },
+    "whitelist_conflict": {
+      "sens_type": "PHONE",
+      "status": "CONFIRMED_MANUAL",
+      "#说明": "同时在白名单里，会冲突"
+    },
+    "ok_field": {
+      "sens_type": "PHONE",
+      "strategy": "retain",
+      "keep_start": 2,
+      "keep_end": 2,
+      "status": "CONFIRMED_MANUAL",
+      "#说明": "完全正常的字段"
+    }
+  },
+  "whitelist_fields": ["whitelist_conflict", "another_whitelist"],
+  "min_confidence": 0.6
+}

@@ -41,6 +41,7 @@ class FileProcessStat:
     output_path: str = ""
     output_status: str = ""
     output_messages: List[str] = field(default_factory=list)
+    field_audit: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -396,6 +397,91 @@ class ReportGenerator:
         )
         lines.append("---\n")
         lines.append(f"*清单生成于 {time.strftime('%Y-%m-%d %H:%M:%S')} by DataMask Tool*")
+
+        content = "\n".join(lines)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return output_path
+
+    @staticmethod
+    def generate_audit_detail(report: ProcessReport, output_path: str) -> str:
+        """生成字段级审计明细表（上架审批归档用）
+
+        按文件分组，列出每个字段的：字段名、敏感类型、脱敏策略、命中条数、
+        样例原值、样例脱敏值、确认方式（自动/手工/跳过/白名单）
+        """
+        from .detector import SENSITIVE_TYPES
+
+        lines = []
+        lines.append("# 数据脱敏处理 - 字段审计明细表\n")
+        lines.append(f"- **任务ID**: `{report.task_id}`")
+        lines.append(f"- **操作类型**: `{report.operation}`")
+        lines.append(f"- **执行时间**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(report.started_at))}")
+        lines.append(f"- **耗时**: {report.duration:.2f}秒")
+        lines.append(f"- **配置文件**: `{report.config_used}`")
+        lines.append(f"- **输出目录**: `{report.output_dir}`\n")
+
+        total_fields = 0
+        total_sensitive_fields = 0
+        total_masked_cells = 0
+
+        status_labels = {
+            "CONFIRMED": "✅ 手工确认",
+            "AUTO_OK": "🤖 自动识别",
+            "NEED_MANUAL": "⚠️ 待人工补充",
+            "SKIPPED": "⏭️ 已跳过",
+            "WHITELIST": "📋 白名单",
+            "UNKNOWN": "❓ 未知",
+        }
+
+        sens_type_labels = dict(SENSITIVE_TYPES)
+
+        success_files = [f for f in report.files if f.field_audit]
+        for fstat in success_files:
+            fname = os.path.basename(fstat.filepath)
+            lines.append(f"## 📄 {fname}\n")
+            lines.append(f"- 格式: {fstat.format}  记录数: {fstat.total_records}  "
+                         f"敏感记录: {fstat.records_with_sensitive}  "
+                         f"脱敏单元格: {fstat.masked_cells}")
+            if fstat.output_path:
+                lines.append(f"- 输出文件: `{fstat.output_path}`")
+            lines.append("")
+
+            lines.append("| # | 字段名 | 敏感类型 | 脱敏策略 | 命中数 | 样例原值 | 样例脱敏值 | 确认方式 |")
+            lines.append("|---|-------|---------|---------|-------|---------|-----------|---------|")
+
+            for i, item in enumerate(fstat.field_audit, 1):
+                total_fields += 1
+                stype = item.get("sens_type", "-")
+                stype_label = sens_type_labels.get(stype, stype) if stype != "-" else "-"
+                strategy = item.get("strategy", "-") or "-"
+                hit_count = item.get("hit_count", 0)
+                if hit_count > 0:
+                    total_sensitive_fields += 1
+                    total_masked_cells += int(item.get("masked_count", 0)) or hit_count
+
+                orig = str(item.get("sample_original", ""))[:40]
+                masked = str(item.get("sample_masked", ""))[:40]
+                status = item.get("status", "UNKNOWN")
+                status_label = status_labels.get(status, status)
+
+                lines.append(
+                    f"| {i} | `{item.get('field', '')}` | {stype_label} | {strategy} | "
+                    f"{hit_count} | `{orig}` | `{masked}` | {status_label} |"
+                )
+            lines.append("")
+
+        lines.append("## 📊 汇总统计\n")
+        lines.append("| 指标 | 数值 |")
+        lines.append("|-----|------|")
+        lines.append(f"| 审计文件数 | {len(success_files)} |")
+        lines.append(f"| 字段总数 | {total_fields} |")
+        lines.append(f"| 敏感字段数 | {total_sensitive_fields} |")
+        lines.append(f"| 脱敏单元格总数 | {total_masked_cells} |\n")
+
+        lines.append("---\n")
+        lines.append(f"*生成于 {time.strftime('%Y-%m-%d %H:%M:%S')} by DataMask Tool*")
 
         content = "\n".join(lines)
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
