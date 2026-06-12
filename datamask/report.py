@@ -38,6 +38,9 @@ class FileProcessStat:
     warnings: List[str] = field(default_factory=list)
     low_confidence_items: List[Dict[str, Any]] = field(default_factory=list)
     unknown_format_fields: List[Dict[str, Any]] = field(default_factory=list)
+    output_path: str = ""
+    output_status: str = ""
+    output_messages: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -56,6 +59,7 @@ class ProcessReport:
     config_used: str = ""
     files: List[FileProcessStat] = field(default_factory=list)
     aggregate: Dict[str, Any] = field(default_factory=dict)
+    extra_outputs: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def total_records(self) -> int:
@@ -293,4 +297,108 @@ class ReportGenerator:
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        return output_path
+
+    @staticmethod
+    def generate_task_summary(report: ProcessReport, output_path: str,
+                              md_report: str = "", json_report: str = "") -> str:
+        """生成可直接发给运营同事复核的任务清单摘要"""
+        lines = []
+        lines.append("# 数据脱敏处理 - 任务复核清单\n")
+        lines.append(f"- **任务ID**: `{report.task_id}`")
+        lines.append(f"- **操作类型**: `{report.operation}`")
+        lines.append(f"- **执行时间**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(report.started_at))}")
+        lines.append(f"- **耗时**: {report.duration:.2f}秒")
+        lines.append(f"- **配置文件**: `{report.config_used}`")
+        lines.append(f"- **输出目录**: `{report.output_dir}`\n")
+
+        lines.append("## 📊 总体概览\n")
+        lines.append("| 指标 | 数值 |")
+        lines.append("|-----|------|")
+        agg = report.aggregate or {}
+        lines.append(f"| 待处理文件总数 | {report.total_files} |")
+        lines.append(f"| ✅ 处理成功 | {report.success_files} |")
+        lines.append(f"| ❌ 处理失败 | {report.failed_files} |")
+        lines.append(f"| ⏭️  跳过(格式不支持) | {report.skipped_files} |")
+        lines.append(f"| 处理记录总数 | {agg.get('total_records', 0)} |")
+        lines.append(f"| 含敏感记录数 | {agg.get('records_with_sensitive', 0)} |")
+        lines.append(f"| 脱敏单元格总数 | {agg.get('total_masked_cells', 0)} |")
+        lines.append(f"| ⚠️  待人工补规则字段 | {agg.get('unknown_format_count', 0)} |")
+        lines.append(f"| ⚠️  低置信度识别项 | {agg.get('low_confidence_count', 0)} |\n")
+
+        lines.append("## 📁 处理明细\n")
+        success_files = [f for f in report.files if not f.errors]
+        fail_files = [f for f in report.files if f.errors]
+        need_manual = [(f, u) for f in report.files for u in f.unknown_format_fields]
+
+        lines.append("### ✅ 处理成功文件\n")
+        if success_files:
+            lines.append("| # | 源文件 | 格式 | 记录 | 敏感 | 脱敏单元格 | 输出文件 | 状态 |")
+            lines.append("|---|-------|------|------|------|----------|---------|------|")
+            for i, f in enumerate(success_files, 1):
+                base_in = os.path.basename(f.filepath)
+                base_out = os.path.basename(f.output_path) if f.output_path else "(未生成)"
+                status = f.output_status or "OK"
+                lines.append(
+                    f"| {i} | `{base_in}` | {f.format} | {f.total_records} | "
+                    f"{f.records_with_sensitive} | {f.masked_cells} | `{base_out}` | {status} |"
+                )
+            lines.append("")
+            for f in success_files:
+                if f.output_path:
+                    lines.append(f"- `{f.filepath}` → `{f.output_path}`")
+            lines.append("")
+        else:
+            lines.append("_暂无成功文件_\n")
+
+        if need_manual:
+            lines.append("### ⚠️  需要人工补规则的字段\n")
+            lines.append("| 文件 | 字段名 | 示例值 | 建议操作 |")
+            lines.append("|-----|-------|-------|---------|")
+            seen_key = set()
+            for f, u in need_manual:
+                key = (os.path.basename(f.filepath), u.get("field"))
+                if key in seen_key:
+                    continue
+                seen_key.add(key)
+                example = str(u.get("value", ""))[:40]
+                suggestion = u.get("suggestion", "在field_overrides中配置sens_type和strategy，或加入whitelist")
+                lines.append(
+                    f"| `{os.path.basename(f.filepath)}` | `{u.get('field')}` | `{example}` | {suggestion} |"
+                )
+            lines.append("")
+
+        if fail_files:
+            lines.append("### ❌ 处理失败/跳过文件\n")
+            lines.append("| # | 文件 | 状态 | 错误信息 |")
+            lines.append("|---|-----|------|---------|")
+            for i, f in enumerate(fail_files, 1):
+                base = os.path.basename(f.filepath)
+                status = f.output_status or "FAIL"
+                err = "；".join(f.errors)[:120]
+                lines.append(f"| {i} | `{base}` | {status} | {err} |")
+            lines.append("")
+
+        lines.append("## 📄 关联报告\n")
+        if md_report:
+            lines.append(f"- 详细检查报告(Markdown): `{md_report}`")
+        if json_report:
+            lines.append(f"- 详细检查报告(JSON): `{json_report}`")
+        lines.append(f"- 规则配置来源: `{report.config_used}`\n")
+
+        lines.append("## 📝 复核说明\n")
+        lines.append(
+            "请数据运营同事完成以下复核:\n"
+            "1. 抽样打开输出文件，确认各敏感字段打码效果符合上架要求；\n"
+            "2. 检查「待人工补规则的字段」清单，如为敏感信息请补充规则后重跑；\n"
+            "3. 检查「处理失败/跳过文件」清单，修复后重新提交处理；\n"
+            "4. 全部确认无误后，将输出目录下的文件提交上架流程。\n"
+        )
+        lines.append("---\n")
+        lines.append(f"*清单生成于 {time.strftime('%Y-%m-%d %H:%M:%S')} by DataMask Tool*")
+
+        content = "\n".join(lines)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(content)
         return output_path

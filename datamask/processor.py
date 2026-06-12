@@ -6,10 +6,10 @@ import os
 import traceback
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple, Callable
+from typing import Dict, List, Any, Optional, Tuple, Callable, Set
 
 from .detector import (
-    detect_record, detect_value, SensitiveMatch, DetectorResult,
+    detect_record, detect_value, detect_value_best, SensitiveMatch, DetectorResult,
     SENSITIVE_TYPES,
 )
 from .masker import MaskEngine, MaskResult
@@ -50,7 +50,7 @@ class DataProcessor:
     def _infer_field_types_across_file(
         self, data: DataFile, stat: FileProcessStat
     ) -> Dict[str, str]:
-        """跨整文件推断每个字段的敏感类型"""
+        """跨整文件推断每个字段的敏感类型（仅做投票推断，不做统计计数）"""
         field_votes: Dict[str, Counter] = {}
         field_low_conf: Dict[str, List[Dict[str, Any]]] = {}
         unknown_fields: Dict[str, Counter] = {}
@@ -61,26 +61,23 @@ class DataProcessor:
             for field_name, value in record.items():
                 if field_name in self.whitelist:
                     continue
-                matches = detect_value(value, field_name, self.min_conf)
-                if matches:
-                    for m in matches:
-                        field_votes.setdefault(field_name, Counter())[m.sens_type] += 1
-                        if m.confidence < 0.8 and m.confidence >= self.min_conf:
-                            field_low_conf.setdefault(field_name, []).append({
-                                "row": idx,
-                                "value": str(value)[:100],
-                                "confidence": m.confidence,
-                                "sens_type": m.sens_type,
-                            })
+                best = detect_value_best(value, field_name, self.min_conf)
+                if best:
+                    field_votes.setdefault(field_name, Counter())[best.sens_type] += 1
+                    if best.confidence < 0.8 and best.confidence >= self.min_conf:
+                        field_low_conf.setdefault(field_name, []).append({
+                            "row": idx,
+                            "value": str(value)[:100],
+                            "confidence": best.confidence,
+                            "sens_type": best.sens_type,
+                        })
                 elif value and str(value).strip():
                     unknown_fields.setdefault(field_name, Counter())["non_empty"] += 1
 
         final_types: Dict[str, str] = {}
         for field_name, votes in field_votes.items():
-            best_type, best_count = votes.most_common(1)[0]
+            best_type, _best_count = votes.most_common(1)[0]
             final_types[field_name] = best_type
-            stat.sensitive_fields[field_name] += best_count
-            stat.sens_type_counts[best_type] += best_count
             if field_name in field_low_conf:
                 stat.low_confidence_items.extend([
                     {"field": field_name, **item} for item in field_low_conf[field_name][:5]
@@ -108,7 +105,7 @@ class DataProcessor:
 
     def scan_file(self, filepath: str,
                   progress_cb: Optional[Callable] = None) -> Tuple[DataFile, Dict[str, str], FileProcessStat]:
-        """扫描单个文件 - 返回数据、字段敏感类型映射、统计"""
+        """扫描单个文件 - 类型推断（抽样）+ 全量精确计数（每字段最佳命中）"""
         stat = FileProcessStat(filepath=filepath)
         data = read_file(filepath)
         stat.format = data.format
@@ -184,6 +181,178 @@ class DataProcessor:
             diff_rows.append(row)
         return diff_rows
 
+    def sample_by_sens_type(
+        self, data: DataFile, field_sens_types: Dict[str, str],
+        per_type: int = 5,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """按敏感类型汇总抽样，每类最多取 per_type 条原值/脱敏值对比
+
+        Returns:
+            { "PHONE": [{"field":xxx, "original":..., "masked":..., "row":1}, ...],
+              "NAME":  [...], ... }
+        """
+        buckets: Dict[str, List[Dict[str, Any]]] = {}
+        seen: Dict[Tuple[str, str], int] = {}
+
+        field_to_type: Dict[str, str] = {}
+        for fname, stype in field_sens_types.items():
+            field_to_type[fname] = stype
+        for fname, rule in self.engine.field_overrides.items():
+            if fname not in field_to_type:
+                field_to_type[fname] = rule.sens_type or "OVERRIDE"
+
+        for idx, record in enumerate(data.records):
+            details = self.engine.mask_record_with_details(
+                record, field_sens_types, self.whitelist
+            )
+            for field, mr in details.items():
+                if not mr.changed:
+                    continue
+                stype = field_to_type.get(field, "UNKNOWN")
+                bucket = buckets.setdefault(stype, [])
+                if len(bucket) >= per_type:
+                    continue
+                key = (stype, str(mr.original))
+                if seen.get(key, 0) >= 1:
+                    continue
+                seen[key] = seen.get(key, 0) + 1
+                bucket.append({
+                    "field": field,
+                    "row": idx + 1,
+                    "original": mr.original,
+                    "masked": mr.masked,
+                    "rule": mr.rule_used,
+                    "risk": mr.risk_level,
+                })
+        return buckets
+
+    def build_rule_draft(
+        self,
+        filepath: Optional[str] = None,
+        include_comments: bool = True,
+        scans: Optional[List[Tuple[str, Any, Dict[str, str], Any]]] = None,
+        base_config: Optional[Any] = None,
+        source_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """基于文件扫描生成可编辑的规则草稿（兼容单文件与多文件两种调用方式）
+
+        方式一（单文件）：传 filepath，内部执行 scan_file 后生成草稿
+        方式二（多文件）：传 scans = [(fpath, data, field_types, stat), ...]，
+                  由 cli 先扫描再统一合并草稿（推荐批量场景）
+        """
+        if scans is None:
+            if not filepath:
+                raise ValueError("build_rule_draft 需要 filepath 或 scans 之一")
+            data, field_types, stat = self.scan_file(filepath)
+            scans = [(filepath, data, field_types, stat)]
+
+        type_rules_json: Dict[str, Any] = {}
+        for stype, rule in self.engine.rules.items():
+            entry = {
+                "strategy": rule.strategy,
+                "mask_char": rule.mask_char,
+                "keep_start": rule.keep_start,
+                "keep_end": rule.keep_end,
+            }
+            if include_comments:
+                from .detector import SENSITIVE_TYPES
+                entry["#类型说明"] = SENSITIVE_TYPES.get(stype, stype)
+                if rule.strategy == "retain":
+                    entry["#策略说明"] = f"保留前{rule.keep_start}位、后{rule.keep_end}位，中间用'{rule.mask_char}'打码"
+                elif rule.strategy == "replace":
+                    entry["#策略说明"] = f"全部用'{rule.mask_char}'替换"
+                elif rule.strategy == "random":
+                    entry["#策略说明"] = "映射为同格式的随机值，同值同映射确保一致性"
+            type_rules_json[stype] = entry
+
+        merged_field_types: Dict[str, str] = {}
+        merged_samples: Dict[str, str] = {}
+        merged_unknowns: Dict[str, Dict[str, Any]] = {}
+        file_field_sources: Dict[str, List[str]] = {}
+        total_records = 0
+        total_fields_set: Set[str] = set()
+
+        for (fpath, data, field_types, stat) in scans:
+            total_records += data.total_records
+            for fname in data.fields:
+                total_fields_set.add(fname)
+                file_field_sources.setdefault(fname, []).append(os.path.basename(fpath))
+                if fname not in merged_samples:
+                    for r in data.records[:3]:
+                        v = r.get(fname)
+                        if v and str(v).strip():
+                            merged_samples[fname] = str(v)[:50]
+                            break
+            for fname, st in field_types.items():
+                if fname not in merged_field_types:
+                    merged_field_types[fname] = st
+            for unk in (stat.unknown_format_fields or []):
+                key = unk["field"]
+                if key not in merged_unknowns:
+                    merged_unknowns[key] = unk
+
+        whitelist = list(self.whitelist)
+        if base_config and getattr(base_config, "whitelist_fields", None):
+            for w in base_config.whitelist_fields:
+                if w not in whitelist:
+                    whitelist.append(w)
+
+        field_overrides_json: Dict[str, Any] = {}
+        all_fields = sorted(total_fields_set)
+        for fname in all_fields:
+            if fname in whitelist:
+                continue
+            stype = merged_field_types.get(fname)
+            sample_val = merged_samples.get(fname, "")
+            sources = file_field_sources.get(fname, [])
+
+            entry: Dict[str, Any] = {}
+            if stype:
+                entry["detected_type"] = stype
+                entry["status"] = "AUTO_OK"
+                if include_comments:
+                    from .detector import SENSITIVE_TYPES
+                    entry["#识别说明"] = f"自动识别为{SENSITIVE_TYPES.get(stype, stype)}，按该类型规则脱敏"
+            else:
+                unk = merged_unknowns.get(fname)
+                if unk:
+                    entry["detected_type"] = None
+                    entry["status"] = "NEED_MANUAL"
+                    entry["suggestion"] = unk.get("suggestion", "请检查字段含义后补充 sens_type 和 strategy")
+                    if include_comments:
+                        entry["#提示"] = "该字段无法自动识别，请手工配置sens_type和strategy后再处理"
+                else:
+                    entry["detected_type"] = None
+                    entry["status"] = "SKIP_NON_SENSITIVE"
+                    if include_comments:
+                        entry["#说明"] = "未识别为敏感内容，默认保持原值不变"
+            if include_comments:
+                entry["#示例值"] = sample_val or "(空)"
+                if len(sources) > 1:
+                    entry["#出现文件"] = sources
+
+            field_overrides_json[fname] = entry
+
+        src = source_path or filepath or (scans[0][0] if scans else "")
+        draft = {
+            "#规则草稿说明": (
+                "此文件由 rules draft 自动生成，供数据运营同事在脱敏前审核确认：\n"
+                "  1) 检查 field_overrides 中每个字段的 detected_type 是否正确；\n"
+                "  2) 标记 NEED_MANUAL 的字段请补充 sens_type 和 strategy 或加入 whitelist_fields；\n"
+                "  3) 标记 AUTO_OK 的字段如无需修改可保留原样；\n"
+                "  4) 确认无误后通过 -c 传此文件给 scan/preview/mask 使用。"
+            ),
+            "source_path": src,
+            "total_files": len(scans),
+            "total_records": total_records,
+            "unique_fields": len(total_fields_set),
+            "type_rules": type_rules_json,
+            "field_overrides": field_overrides_json,
+            "whitelist_fields": whitelist,
+            "min_confidence": self.min_conf,
+        }
+        return draft
+
     def process_folder(
         self, folder: str, output_dir: str,
         operation: str = "mask",
@@ -217,6 +386,7 @@ class DataProcessor:
                 file_stat.format = data.format
 
                 if operation == "scan":
+                    file_stat.output_status = "SCAN_OK"
                     report.files.append(file_stat)
                     report.success_files += 1
                     continue
@@ -224,6 +394,7 @@ class DataProcessor:
                 masked_records = self.mask_file(data, field_types, file_stat, progress_cb)
 
                 if operation == "preview":
+                    file_stat.output_status = "PREVIEW_OK"
                     report.files.append(file_stat)
                     report.success_files += 1
                     continue
@@ -238,40 +409,82 @@ class DataProcessor:
                         total_records=len(masked_records),
                     )
                     write_file(out_path, out_data)
+                    file_stat.output_path = out_path
+                    file_stat.output_status = "MASK_OK"
+                else:
+                    file_stat.output_status = "DRY_OK" if operation == "mask" else "PREVIEW_OK"
+
+                need_manual = [u["field"] for u in file_stat.unknown_format_fields]
+                if need_manual:
+                    file_stat.output_messages.append(f"需人工补规则字段: {', '.join(need_manual)}")
 
                 report.files.append(file_stat)
                 report.success_files += 1
 
             except UnsupportedFormatError as e:
                 file_stat.errors.append(f"格式不支持: {e}")
+                file_stat.output_status = "SKIP_FORMAT"
                 report.files.append(file_stat)
                 report.skipped_files += 1
             except FileReadError as e:
                 file_stat.errors.append(f"读取失败: {e.reason}")
+                file_stat.output_status = "FAIL_READ"
                 report.files.append(file_stat)
                 report.failed_files += 1
             except FileWriteError as e:
                 file_stat.errors.append(f"写入失败: {e.reason}")
+                file_stat.output_status = "FAIL_WRITE"
                 report.files.append(file_stat)
                 report.failed_files += 1
             except Exception as e:
                 tb = traceback.format_exc(limit=2)
                 file_stat.errors.append(f"未知错误: {e}\n{tb}")
+                file_stat.output_status = "FAIL_UNKNOWN"
                 report.files.append(file_stat)
                 report.failed_files += 1
 
         ReportGenerator.finalize_report(report)
 
+        report_dir = None
+        task_stamp = report.task_id
+        md_report_path = ""
+        json_report_path = ""
+        summary_path = ""
+
         if operation == "mask" and not dry_run and report_formats:
             report_dir = os.path.join(output_dir, "_reports")
-            task_stamp = report.task_id
             if "markdown" in report_formats:
-                ReportGenerator.generate_markdown(
-                    report, os.path.join(report_dir, f"report_{task_stamp}.md")
-                )
+                md_report_path = os.path.join(report_dir, f"report_{task_stamp}.md")
+                ReportGenerator.generate_markdown(report, md_report_path)
             if "json" in report_formats:
-                ReportGenerator.generate_json(
-                    report, os.path.join(report_dir, f"report_{task_stamp}.json")
+                json_report_path = os.path.join(report_dir, f"report_{task_stamp}.json")
+                ReportGenerator.generate_json(report, json_report_path)
+            summary_path = os.path.join(report_dir, f"summary_{task_stamp}.md")
+            ReportGenerator.generate_task_summary(
+                report, summary_path,
+                md_report=md_report_path, json_report=json_report_path,
+            )
+        elif operation == "report" or operation == "scan":
+            report_dir = os.path.join(output_dir, "_reports") if output_dir else None
+            if report_dir and report_formats:
+                if "markdown" in report_formats:
+                    md_report_path = os.path.join(report_dir, f"report_{task_stamp}.md")
+                    ReportGenerator.generate_markdown(report, md_report_path)
+                if "json" in report_formats:
+                    json_report_path = os.path.join(report_dir, f"report_{task_stamp}.json")
+                    ReportGenerator.generate_json(report, json_report_path)
+                summary_path = os.path.join(report_dir, f"summary_{task_stamp}.md")
+                ReportGenerator.generate_task_summary(
+                    report, summary_path,
+                    md_report=md_report_path, json_report=json_report_path,
                 )
+
+        report.extra_outputs = {
+            "report_dir": report_dir,
+            "md_report": md_report_path,
+            "json_report": json_report_path,
+            "task_summary": summary_path,
+            "task_id": task_stamp,
+        }
 
         return report

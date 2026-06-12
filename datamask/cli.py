@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 命令行入口 - 数据要素样本脱敏工具
-四个命令: scan, mask, preview, report
+五个命令: scan, mask, preview, report, rules
 """
 import os
 import sys
+import io
 import json
 from pathlib import Path
 from typing import List, Optional
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 import click
 from colorama import Fore, Style, init as colorama_init
@@ -96,6 +104,37 @@ def _print_unknown_format_hint(file_stat, filepath):
             example = str(item["value"])[:40]
             click.echo(_c(f"   • 字段 '{field}': 示例值='{example}'", Fore.YELLOW))
             click.echo(_c(f"     建议: 在field_overrides中添加 \"{field}\" 配置脱敏策略", Fore.LIGHTBLACK_EX))
+
+
+def _print_extra_outputs(extra: dict):
+    if not extra:
+        return
+    mapping = [
+        ("task_summary", "任务清单摘要 (Markdown)"),
+        ("task_summary_md", "任务清单摘要 (Markdown)"),
+        ("task_summary_json", "任务清单摘要 (JSON)"),
+        ("md_report", "检查报告 (Markdown)"),
+        ("report_md", "检查报告 (Markdown)"),
+        ("json_report", "检查报告 (JSON)"),
+        ("report_json", "检查报告 (JSON)"),
+        ("rule_draft", "规则草稿文件"),
+    ]
+    rows = []
+    seen_paths = set()
+    for key, label in mapping:
+        path = extra.get(key)
+        if not path:
+            continue
+        if not isinstance(path, str) or not os.path.exists(path):
+            continue
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        rows.append([_c(label, Fore.LIGHTYELLOW_EX), _c(path, Fore.LIGHTBLUE_EX)])
+    if rows:
+        click.echo()
+        click.echo(_c("📦 产出物清单:", Fore.LIGHTGREEN_EX))
+        click.echo(tabulate(rows, headers=["类型", "路径"], tablefmt="simple", stralign="left"))
 
 
 @click.group()
@@ -317,13 +356,8 @@ def mask_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
     if agg.get("low_confidence_count", 0):
         click.echo(_c(f"   ⚠️  低置信度项目: {agg['low_confidence_count']}", Fore.YELLOW))
 
-    if not dry_run and not no_report:
-        report_dir = os.path.join(out_abs, "_reports")
-        task_id = report.task_id
-        click.echo()
-        click.echo(_c("📋 报告已生成:", Fore.LIGHTGREEN_EX))
-        click.echo(_c(f"   Markdown: {os.path.join(report_dir, f'report_{task_id}.md')}", Fore.LIGHTBLUE_EX))
-        click.echo(_c(f"   JSON:     {os.path.join(report_dir, f'report_{task_id}.json')}", Fore.LIGHTBLUE_EX))
+    if not dry_run:
+        _print_extra_outputs(getattr(report, "extra_outputs", None) or {})
 
     if report.failed_files or report.total_errors:
         sys.exit(2)
@@ -342,12 +376,21 @@ def mask_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
               help="最小识别置信度阈值")
 @click.option("-w", "--whitelist", multiple=True, help="白名单字段")
 @click.option("-n", "--rows", type=int, default=5, show_default=True,
-              help="每个文件预览的行数")
+              help="rows 模式下每个文件预览的行数")
+@click.option("--mode", "preview_mode",
+              type=click.Choice(["rows", "by-type"]),
+              default="rows", show_default=True,
+              help="预览模式: rows=前N行逐列对比; by-type=按敏感类型汇总抽样")
+@click.option("--per-type", "per_type", type=int, default=5, show_default=True,
+              help="by-type 模式下每种敏感类型最多抽样条数")
 def preview_cmd(input_path, config_path, recursive, strategy_opts,
-                min_confidence, whitelist, rows):
+                min_confidence, whitelist, rows, preview_mode, per_type):
     """展示脱敏前后的对比预览
 
-    对前N行数据展示原始值和脱敏后值的逐列对比，方便在正式脱敏前确认效果。
+    两种预览模式：
+    • rows 模式：对前 N 行数据逐列展示原始值和脱敏值对比
+    • by-type 模式：按敏感类型汇总抽样，每类最多 N 条原值/脱敏值对照，
+      适合正式上架前按类型确认效果
     """
     _print_banner()
     config = _load_config(config_path)
@@ -364,9 +407,13 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
         click.echo(_c(f"⚠️  未找到支持的文件", Fore.YELLOW))
         sys.exit(0)
 
-    click.echo(_c(f"👀 预览模式: 脱敏前后对比 (前{rows}行)", Fore.GREEN))
+    mode_label = f"前{rows}行逐列对比" if preview_mode == "rows" else f"按敏感类型汇总抽样 (每类最多{per_type}条)"
+    click.echo(_c(f"👀 预览模式: {mode_label}", Fore.GREEN))
     click.echo(f"   输入: {_c(input_path, Fore.CYAN)}")
     click.echo()
+
+    if preview_mode == "by-type":
+        global_samples: dict = {}
 
     for fpath in files:
         click.echo(_c(f"{'=' * 70}", Fore.LIGHTCYAN_EX))
@@ -377,40 +424,77 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
                 click.echo(_c("   (空文件)", Fore.LIGHTBLACK_EX))
                 continue
 
-            diff_rows = processor.preview_diff(data, field_types, rows)
+            if preview_mode == "rows":
+                diff_rows = processor.preview_diff(data, field_types, rows)
 
-            display_fields = []
-            for f in data.fields:
-                if f in field_types or f in whitelist:
-                    display_fields.append(f)
-            if not display_fields:
-                display_fields = data.fields[:5]
+                display_fields = []
+                for f in data.fields:
+                    if f in field_types or f in whitelist:
+                        display_fields.append(f)
+                if not display_fields:
+                    display_fields = data.fields[:5]
 
-            for diff_row in diff_rows:
-                row_num = diff_row["__row__"]
-                click.echo()
-                click.echo(_c(f"   ── 第 {row_num} 行 ──", Fore.LIGHTBLACK_EX))
-                table = []
-                for fname in display_fields:
-                    info = diff_row.get(fname, {})
-                    orig = str(info.get("original", ""))[:30]
-                    masked = str(info.get("masked", ""))[:30]
-                    changed = info.get("changed", False)
-                    rule = info.get("rule", "")
-                    stype = TYPE_LABELS.get(field_types.get(fname, ""),
-                                            field_types.get(fname, ""))
-                    mark = _c(" ⚑", Fore.MAGENTA) if changed else ""
-                    stype_col = _c(stype, Fore.LIGHTMAGENTA_EX) if stype else ""
-                    orig_col = _c(orig, Fore.RED) if changed else orig
-                    masked_col = _c(masked, Fore.GREEN) if changed else masked
-                    rule_col = _c(rule or "", Fore.LIGHTBLACK_EX)
-                    table.append([fname, stype_col, orig_col, masked_col, rule_col])
-                click.echo(tabulate(
-                    table,
-                    headers=["字段", "类型", "原始", "脱敏后", "规则"],
-                    tablefmt="simple", stralign="left"
-                ))
-            _print_unknown_format_hint(stat, fpath)
+                for diff_row in diff_rows:
+                    row_num = diff_row["__row__"]
+                    click.echo()
+                    click.echo(_c(f"   ── 第 {row_num} 行 ──", Fore.LIGHTBLACK_EX))
+                    table = []
+                    for fname in display_fields:
+                        info = diff_row.get(fname, {})
+                        orig = str(info.get("original", ""))[:30]
+                        masked = str(info.get("masked", ""))[:30]
+                        changed = info.get("changed", False)
+                        rule = info.get("rule", "")
+                        stype = TYPE_LABELS.get(field_types.get(fname, ""),
+                                                field_types.get(fname, ""))
+                        mark = _c(" ⚑", Fore.MAGENTA) if changed else ""
+                        stype_col = _c(stype, Fore.LIGHTMAGENTA_EX) if stype else ""
+                        orig_col = _c(orig, Fore.RED) if changed else orig
+                        masked_col = _c(masked, Fore.GREEN) if changed else masked
+                        rule_col = _c(rule or "", Fore.LIGHTBLACK_EX)
+                        table.append([fname, stype_col, orig_col, masked_col, rule_col])
+                    click.echo(tabulate(
+                        table,
+                        headers=["字段", "类型", "原始", "脱敏后", "规则"],
+                        tablefmt="simple", stralign="left"
+                    ))
+                _print_unknown_format_hint(stat, fpath)
+            else:
+                samples = processor.sample_by_sens_type(data, field_types, per_type=per_type)
+                if preview_mode == "by-type" and samples:
+                    for stype, entries in samples.items():
+                        if stype not in global_samples:
+                            global_samples[stype] = []
+                        for e in entries[:per_type]:
+                            e2 = dict(e)
+                            e2["source_file"] = os.path.basename(fpath)
+                            global_samples[stype].append(e2)
+
+                if not samples:
+                    click.echo(_c("   未发现敏感数据", Fore.LIGHTBLACK_EX))
+                else:
+                    for stype, entries in samples.items():
+                        label = TYPE_LABELS.get(stype, stype)
+                        click.echo()
+                        click.echo(_c(f"   ▣ {label} ({stype}) 共 {len(entries)} 条样例", Fore.MAGENTA))
+                        table = []
+                        for idx, e in enumerate(entries[:per_type], 1):
+                            orig = str(e.get("original", ""))[:35]
+                            masked = str(e.get("masked", ""))[:35]
+                            rule = str(e.get("rule", ""))
+                            table.append([
+                                str(idx),
+                                e.get("field", ""),
+                                _c(orig, Fore.RED),
+                                _c(masked, Fore.GREEN),
+                                _c(rule, Fore.LIGHTBLACK_EX),
+                            ])
+                        click.echo(tabulate(
+                            table,
+                            headers=["#", "字段", "原始", "脱敏后", "规则"],
+                            tablefmt="simple", stralign="left"
+                        ))
+                    _print_unknown_format_hint(stat, fpath)
 
         except UnsupportedFormatError as e:
             click.echo(_c(f"   ⚠️  跳过: {e}", Fore.YELLOW))
@@ -419,6 +503,42 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
         except Exception as e:
             click.echo(_c(f"   ❌ 处理错误: {e}", Fore.RED))
         click.echo()
+
+    if preview_mode == "by-type" and global_samples and len(files) > 1:
+        click.echo(_c("═" * 70, Fore.LIGHTYELLOW_EX))
+        click.echo(_c(f"📊 跨文件按敏感类型汇总抽样 (每类最多 {per_type} 条)", Fore.LIGHTYELLOW_EX))
+        for stype, entries in sorted(global_samples.items(), key=lambda x: -len(x[1])):
+            label = TYPE_LABELS.get(stype, stype)
+            deduped = []
+            seen_keys = set()
+            for e in entries:
+                k = (e.get("original"), e.get("masked"))
+                if k in seen_keys:
+                    continue
+                seen_keys.add(k)
+                deduped.append(e)
+                if len(deduped) >= per_type:
+                    break
+            click.echo()
+            click.echo(_c(f"   ▣ {label} ({stype}) 展示 {len(deduped)} 条", Fore.MAGENTA))
+            table = []
+            for idx, e in enumerate(deduped, 1):
+                orig = str(e.get("original", ""))[:35]
+                masked = str(e.get("masked", ""))[:35]
+                rule = str(e.get("rule", ""))
+                table.append([
+                    str(idx),
+                    _c(str(e.get("source_file", "")), Fore.CYAN),
+                    e.get("field", ""),
+                    _c(orig, Fore.RED),
+                    _c(masked, Fore.GREEN),
+                    _c(rule, Fore.LIGHTBLACK_EX),
+                ])
+            click.echo(tabulate(
+                table,
+                headers=["#", "文件", "字段", "原始", "脱敏后", "规则"],
+                tablefmt="simple", stralign="left"
+            ))
 
 
 @cli.command("report")
@@ -469,31 +589,20 @@ def report_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
     click.echo(f"   文件数: {_c(str(len(files)), Fore.CYAN)}")
     click.echo()
 
-    report = processor.process_folder(
-        folder=input_abs,
-        output_dir=out_abs,
-        operation="scan",
-        recursive=recursive,
-        dry_run=True,
-        report_formats=(),
-    )
-
-    task_id = report.task_id
     formats = []
     if report_format in ("markdown", "all", "both"):
         formats.append("markdown")
     if report_format in ("json", "all", "both"):
         formats.append("json")
 
-    report_paths = []
-    if "markdown" in formats:
-        p = os.path.join(out_abs, f"scan_report_{task_id}.md")
-        ReportGenerator.generate_markdown(report, p)
-        report_paths.append(p)
-    if "json" in formats:
-        p = os.path.join(out_abs, f"scan_report_{task_id}.json")
-        ReportGenerator.generate_json(report, p)
-        report_paths.append(p)
+    report = processor.process_folder(
+        folder=input_abs,
+        output_dir=out_abs,
+        operation="report",
+        recursive=recursive,
+        dry_run=True,
+        report_formats=tuple(formats),
+    )
 
     agg = report.aggregate
     click.echo(_c("─" * 50, Fore.CYAN))
@@ -528,9 +637,152 @@ def report_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
             click.echo(_c(f"   - {e[:100]}", Fore.RED))
 
     click.echo(_c("=" * 60, Fore.CYAN))
-    click.echo(_c("✅ 报告已生成:", Fore.GREEN))
-    for p in report_paths:
-        click.echo(_c(f"   📄 {p}", Fore.LIGHTBLUE_EX))
+    _print_extra_outputs(getattr(report, "extra_outputs", None) or {})
+
+
+@cli.group("rules")
+def rules_cmd():
+    """规则模板与草稿管理
+
+    提供规则模板导出、基于现有数据生成可编辑规则草稿等功能，
+    方便运营人员先确认字段含义再执行 scan/preview/mask。
+    """
+    pass
+
+
+@rules_cmd.command("export")
+@click.option("-o", "--output", "output_path", required=True, type=click.Path(),
+              help="模板输出路径 (JSON文件)")
+@click.option("--with-comments/--no-comments", default=True, show_default=True,
+              help="是否在模板中附带详细说明和示例字段 (# 开头的注释字段)")
+def rules_export_cmd(output_path, with_comments):
+    """导出默认规则模板 (含说明和示例)
+
+    导出一份可编辑的规则模板，包含各敏感类型的默认脱敏策略、
+    字段级覆写示例、白名单字段和说明注释。运营人员可以在此基础上修改后
+    作为其他命令的 -c 配置文件使用。
+    """
+    _print_banner()
+    config = MaskConfig.load(None)
+    out_abs = os.path.abspath(output_path)
+    try:
+        config.export_template(out_abs, with_comments=with_comments)
+    except OSError as e:
+        click.echo(_c(f"❌ 写入失败: {e}", Fore.RED), err=True)
+        sys.exit(1)
+    click.echo(_c("📤 规则模板已导出:", Fore.LIGHTGREEN_EX))
+    click.echo(_c(f"   📄 {out_abs}", Fore.LIGHTBLUE_EX))
+    if with_comments:
+        click.echo()
+        click.echo(_c("💡 编辑提示:", Fore.LIGHTYELLOW_EX))
+        click.echo(_c("   • # 开头的字段是说明注释，不影响实际运行", Fore.LIGHTBLACK_EX))
+        click.echo(_c("   • field_overrides 中按示例填写需要强制指定规则的字段", Fore.LIGHTBLACK_EX))
+        click.echo(_c("   • 编辑完成后用 -c <文件> 传入其他命令使用", Fore.LIGHTBLACK_EX))
+
+
+@rules_cmd.command("draft")
+@click.option("-i", "--input", "input_path", required=True, type=click.Path(),
+              help="输入文件或文件夹，用于扫描并生成草稿")
+@click.option("-o", "--output", "output_path", required=True, type=click.Path(),
+              help="草稿输出路径 (JSON文件)")
+@click.option("-c", "--config", "config_path", default=None, type=click.Path(),
+              help="基础规则配置（可选，草稿会在此基础上补充字段建议）")
+@click.option("-r", "--recursive/--no-recursive", default=True,
+              help="递归扫描子文件夹 (默认开启)")
+@click.option("--min-confidence", type=float, default=None,
+              help="最小识别置信度阈值")
+@click.option("-w", "--whitelist", multiple=True, help="白名单字段")
+def rules_draft_cmd(input_path, output_path, config_path, recursive, min_confidence, whitelist):
+    """基于数据扫描结果生成可编辑的规则草稿
+
+    扫描输入文件（或文件夹），按系统识别结果生成一份规则草稿：
+    • 自动识别的字段标注 status=AUTO_OK，可直接使用
+    • 疑似敏感但不确定的字段标注 status=NEED_MANUAL，需运营人工补 sens_type
+    • 非敏感字段标注 status=SKIP_NON_SENSITIVE，不会被处理
+
+    草稿用文本编辑器修改确认后，作为其他命令的 -c 配置文件传入即可。
+    """
+    _print_banner()
+    config = _load_config(config_path)
+    strategy_overrides = {}
+    processor = DataProcessor(config, strategy_overrides, list(whitelist), min_confidence)
+
+    input_abs = os.path.abspath(input_path)
+    if not os.path.exists(input_abs):
+        click.echo(_c(f"❌ 输入路径不存在: {input_path}", Fore.RED), err=True)
+        sys.exit(1)
+
+    files = get_supported_files(input_path, recursive)
+    if not files:
+        click.echo(_c(f"⚠️  未找到支持的文件: {input_path}", Fore.YELLOW))
+        click.echo(_c(f"   支持格式: {', '.join(SUPPORTED_FORMATS.keys())}", Fore.LIGHTBLACK_EX))
+        sys.exit(0)
+
+    click.echo(_c("📝 草稿生成模式: 基于扫描结果生成规则", Fore.GREEN))
+    click.echo(f"   输入: {_c(input_path, Fore.CYAN)} (共{len(files)}个文件)")
+    click.echo(f"   输出: {_c(output_path, Fore.CYAN)}")
+    click.echo()
+
+    all_scans = []
+    all_field_types: dict = {}
+    for fpath in files:
+        fname = os.path.basename(fpath)
+        click.echo(_c(f"   🔍 扫描 {fname} ...", Fore.LIGHTCYAN_EX))
+        try:
+            data, field_types, stat = processor.scan_file(fpath)
+            all_scans.append((fpath, data, field_types, stat))
+            for k, v in field_types.items():
+                all_field_types[k] = v
+            pct = (stat.records_with_sensitive / stat.total_records * 100) if stat.total_records else 0
+            click.echo(_c(f"      ✅ 记录{stat.total_records} 敏感{stat.records_with_sensitive}({pct:.0f}%)",
+                          Fore.LIGHTBLACK_EX))
+        except UnsupportedFormatError as e:
+            click.echo(_c(f"      ⚠️  跳过: {e}", Fore.YELLOW))
+        except FileReadError as e:
+            click.echo(_c(f"      ❌ 读取失败: {e.reason}", Fore.RED))
+        except Exception as e:
+            click.echo(_c(f"      ❌ 错误: {e}", Fore.RED))
+
+    click.echo()
+    if not all_scans:
+        click.echo(_c("❌ 没有成功扫描到任何文件，草稿未生成", Fore.RED), err=True)
+        sys.exit(1)
+
+    draft = processor.build_rule_draft(
+        scans=all_scans,
+        base_config=config,
+        source_path=input_abs,
+    )
+
+    out_abs = os.path.abspath(output_path)
+    os.makedirs(os.path.dirname(out_abs) or ".", exist_ok=True)
+    try:
+        with open(out_abs, "w", encoding="utf-8") as f:
+            json.dump(draft, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        click.echo(_c(f"❌ 写入草稿失败: {e}", Fore.RED), err=True)
+        sys.exit(1)
+
+    stats = {"AUTO_OK": 0, "NEED_MANUAL": 0, "SKIP_NON_SENSITIVE": 0}
+    for entry in draft.get("field_overrides", {}).values():
+        s = entry.get("status", "CUSTOM")
+        if s in stats:
+            stats[s] += 1
+
+    click.echo(_c("=" * 50, Fore.CYAN))
+    click.echo(_c("✅ 规则草稿已生成:", Fore.LIGHTGREEN_EX))
+    click.echo(_c(f"   📄 {out_abs}", Fore.LIGHTBLUE_EX))
+    click.echo()
+    click.echo(_c("📊 字段状态统计:", Fore.LIGHTMAGENTA_EX))
+    click.echo(f"   自动识别 (AUTO_OK)        : {_c(str(stats['AUTO_OK']), Fore.GREEN)} 个")
+    click.echo(f"   需人工补充 (NEED_MANUAL)  : {_c(str(stats['NEED_MANUAL']), Fore.YELLOW)} 个")
+    click.echo(f"   非敏感 (SKIP_NON_SENSITIVE): {_c(str(stats['SKIP_NON_SENSITIVE']), Fore.LIGHTBLACK_EX)} 个")
+    click.echo()
+    click.echo(_c("💡 下一步建议:", Fore.LIGHTYELLOW_EX))
+    click.echo(_c("   1. 打开草稿，查找 status=NEED_MANUAL 的字段补充 sens_type", Fore.LIGHTBLACK_EX))
+    click.echo(_c("   2. 根据业务需要修改各字段的 strategy / keep_start / keep_end 等", Fore.LIGHTBLACK_EX))
+    click.echo(_c("   3. 确认无误后： python main.py preview -i 输入 -c 草稿 --mode by-type", Fore.LIGHTBLACK_EX))
+    click.echo(_c("   4. 最终执行： python main.py mask -i 输入 -o 输出 -c 草稿", Fore.LIGHTBLACK_EX))
 
 
 def main():

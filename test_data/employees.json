@@ -1,32 +1,29 @@
 [
   {
     "emp_no": "E1001",
-    "full_name": "陈建国",
-    "mobile": "13700011223",
-    "id_card": "120101197810152345",
-    "email": "chenjg@corp.com",
-    "residence": "天津市和平区南京路189号津汇广场2号楼2201",
-    "company": "天津滨海国际物流有限公司",
+    "name": "张伟",
+    "phone": "13800138001",
+    "id_card": "110101199003078888",
+    "email": "zhangwei@example.com",
+    "备注": "VIP客户，优先处理",
     "unknown_col": "随机字符串ABC123"
   },
   {
     "emp_no": "E1002",
-    "full_name": "刘洋",
-    "mobile": "13811223344",
-    "id_card": "320102198504185678",
-    "email": "liuyang@corp.com",
-    "residence": "南京市玄武区中山路18号德基广场写字楼2801",
-    "company": "南京长江航运集团有限公司",
-    "unknown_col": "数据项XYZ456"
+    "name": "李娜",
+    "phone": "13900139002",
+    "id_card": "310104198508156666",
+    "email": "lina@example.com",
+    "备注": "新入职员工",
+    "unknown_col": "XYZ999-测试"
   },
   {
     "emp_no": "E1003",
-    "full_name": "黄晓明",
-    "mobile": "13988776655",
-    "id_card": "370102198309221234",
-    "email": "huangxm@corp.com",
-    "residence": "济南市历下区泉城路26号万达广场B座1805",
-    "company": "山东齐鲁化工股份有限公司",
-    "unknown_col": "示例值789"
+    "name": "王强",
+    "phone": "13700137003",
+    "id_card": "440106199212123333",
+    "email": "wangqiang@example.com",
+    "备注": "年假申请中",
+    "unknown_col": "OTHER_888"
   }
 ]

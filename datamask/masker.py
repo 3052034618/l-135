@@ -246,19 +246,37 @@ class MaskEngine:
             return self.mapper.map_generic(value, f"{scope}:generic")
 
     def mask_value(self, value: Any, sens_type: Optional[str] = None,
-                   field_name: str = "") -> MaskResult:
-        """对单个值脱敏"""
+                   field_name: str = "", strict: bool = True) -> MaskResult:
+        """对单个值脱敏
+
+        Args:
+            strict: 严格模式（默认True）- 仅当有明确识别类型或手工配置时才脱敏，
+                    普通编号/备注字段保持原值不变。
+                    False 才会对未知内容启用默认打码规则。
+        """
         if value is None or (isinstance(value, str) and not value.strip()):
             return MaskResult(original=value, masked=value, changed=False, rule_used=None)
 
         str_val = str(value)
 
+        has_override = bool(field_name) and (field_name in self.field_overrides)
+        has_sens = bool(sens_type) and (sens_type in self.rules)
+
+        if strict and not has_override and not has_sens:
+            return MaskResult(
+                original=value,
+                masked=value,
+                changed=False,
+                rule_used="auto_skip_unsure",
+                risk_level="ignored"
+            )
+
         rule = None
         rule_source = None
-        if field_name and field_name in self.field_overrides:
+        if has_override:
             rule = self.field_overrides[field_name]
             rule_source = f"field:{field_name}"
-        elif sens_type and sens_type in self.rules:
+        elif has_sens:
             rule = self.rules[sens_type]
             rule_source = f"type:{sens_type}"
 

@@ -338,9 +338,30 @@ ALL_DETECTORS = [
 ]
 
 
+def _resolve_overlaps(matches: List[SensitiveMatch]) -> List[SensitiveMatch]:
+    """解决区间重叠的冲突，相同位置只保留置信度最高的匹配"""
+    if not matches:
+        return matches
+    matches = sorted(matches, key=lambda m: (-m.confidence, m.start, m.end))
+    selected: List[SensitiveMatch] = []
+    used: List[Tuple[int, int]] = []
+    for m in matches:
+        s, e = m.start, m.end
+        overlap = False
+        for us, ue in used:
+            if not (e <= us or s >= ue):
+                overlap = True
+                break
+        if not overlap:
+            selected.append(m)
+            used.append((s, e))
+    selected.sort(key=lambda m: -m.confidence)
+    return selected
+
+
 def detect_value(value: Any, field_name: str = "",
                  min_confidence: float = 0.6) -> List[SensitiveMatch]:
-    """检测单个值中的所有敏感内容"""
+    """检测单个值中的所有敏感内容（已做区间重叠去重）"""
     if value is None:
         return []
     str_val = str(value).strip()
@@ -362,13 +383,20 @@ def detect_value(value: Any, field_name: str = "",
         except Exception:
             continue
 
-    all_matches.sort(key=lambda m: -m.confidence)
+    all_matches = _resolve_overlaps(all_matches)
     return all_matches
+
+
+def detect_value_best(value: Any, field_name: str = "",
+                      min_confidence: float = 0.6) -> Optional[SensitiveMatch]:
+    """检测单个值，仅返回置信度最高的最佳命中（用于统计，避免一值多算）"""
+    matches = detect_value(value, field_name, min_confidence)
+    return matches[0] if matches else None
 
 
 def detect_record(record: Dict[str, Any], whitelist: List[str] = None,
                   min_confidence: float = 0.6) -> DetectorResult:
-    """检测一条记录中的所有字段"""
+    """检测一条记录中的所有字段（每字段只算最佳命中，用于统计不重复计数）"""
     whitelist = whitelist or []
     matches: List[SensitiveMatch] = []
     field_types: Dict[str, str] = {}
@@ -376,10 +404,9 @@ def detect_record(record: Dict[str, Any], whitelist: List[str] = None,
     for field_name, value in record.items():
         if field_name in whitelist:
             continue
-        field_matches = detect_value(value, field_name, min_confidence)
-        if field_matches:
-            best = field_matches[0]
-            matches.extend(field_matches)
+        best = detect_value_best(value, field_name, min_confidence)
+        if best:
+            matches.append(best)
             if field_name and best.confidence >= min_confidence:
                 field_types[field_name] = best.sens_type
 
