@@ -1,0 +1,58 @@
+{
+  "version": "1.0",
+  "description": "默认脱敏规则配置",
+  "type_rules": {
+    "PHONE": {
+      "strategy": "retain",
+      "keep_start": 3,
+      "keep_end": 4,
+      "mask_char": "*",
+      "comment": "手机号：保留前3后4"
+    },
+    "ID_CARD": {
+      "strategy": "retain",
+      "keep_start": 6,
+      "keep_end": 4,
+      "mask_char": "*",
+      "comment": "身份证：保留前6(地区)后4"
+    },
+    "NAME": {
+      "strategy": "retain",
+      "keep_start": 1,
+      "keep_end": 0,
+      "mask_char": "*",
+      "comment": "姓名：保留姓，其余打码"
+    },
+    "COMPANY": {
+      "strategy": "retain",
+      "keep_start": 2,
+      "keep_end": 4,
+      "mask_char": "*",
+      "comment": "企业：保留前2后4"
+    },
+    "ADDRESS": {
+      "strategy": "retain",
+      "keep_start": 6,
+      "keep_end": 3,
+      "mask_char": "*",
+      "comment": "地址：保留前6后3"
+    },
+    "EMAIL": {
+      "strategy": "retain",
+      "keep_start": 2,
+      "keep_end": 4,
+      "mask_char": "*",
+      "comment": "邮箱：保留前2位@及后4位域名"
+    },
+    "BANK_CARD": {
+      "strategy": "retain",
+      "keep_start": 4,
+      "keep_end": 4,
+      "mask_char": "*",
+      "comment": "银行卡：保留前4后4"
+    }
+  },
+  "field_overrides": {},
+  "whitelist_fields": [],
+  "min_confidence": 0.6
+}

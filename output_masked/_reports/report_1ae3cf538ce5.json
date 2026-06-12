@@ -1,0 +1,337 @@
+{
+  "task_id": "1ae3cf538ce5",
+  "started_at": 1781303520.4476645,
+  "finished_at": 1781303520.9035578,
+  "duration": 0.45589327812194824,
+  "operation": "mask",
+  "total_files": 3,
+  "success_files": 3,
+  "failed_files": 0,
+  "skipped_files": 0,
+  "output_dir": "D:\\trae-bz\\TraeProjects\\135\\output_masked",
+  "config_used": "D:\\trae-bz\\TraeProjects\\135\\datamask\\rules\\default_rules.json",
+  "files": [
+    {
+      "filepath": "D:\\trae-bz\\TraeProjects\\135\\test_data\\customers.csv",
+      "format": "CSV",
+      "total_records": 5,
+      "total_fields": 8,
+      "records_with_sensitive": 5,
+      "sensitive_fields": {
+        "姓名": 10,
+        "手机号": 10,
+        "身份证号": 15,
+        "邮箱": 10,
+        "地址": 11,
+        "公司名称": 10
+      },
+      "sens_type_counts": {
+        "NAME": 10,
+        "PHONE": 10,
+        "ID_CARD": 10,
+        "EMAIL": 10,
+        "ADDRESS": 10,
+        "COMPANY": 11,
+        "BANK_CARD": 5
+      },
+      "mask_strategy_counts": {
+        "whitelist_skip": 5,
+        "retain": 25,
+        "random": 5,
+        "default_retain": 4
+      },
+      "risk_level_counts": {
+        "normal": 31,
+        "high_safe": 5,
+        "unknown": 4
+      },
+      "masked_cells": 34,
+      "whitelist_skipped_cells": 5,
+      "errors": [],
+      "warnings": [],
+      "low_confidence_items": [
+        {
+          "field": "身份证号",
+          "row": 0,
+          "value": "110101199003076578",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "身份证号",
+          "row": 1,
+          "value": "310110198812254321",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "身份证号",
+          "row": 2,
+          "value": "440106199506127890",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "身份证号",
+          "row": 3,
+          "value": "510107198711089012",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "身份证号",
+          "row": 4,
+          "value": "330106199207234567",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "地址",
+          "row": 2,
+          "value": "广州市天河区珠江新城华夏路10号富力中心2505",
+          "confidence": 0.65,
+          "sens_type": "ADDRESS"
+        },
+        {
+          "field": "地址",
+          "row": 3,
+          "value": "成都市锦江区春熙路131号银石广场15A层",
+          "confidence": 0.65,
+          "sens_type": "ADDRESS"
+        },
+        {
+          "field": "地址",
+          "row": 4,
+          "value": "杭州市西湖区文三路478号华星时代广场C座1201",
+          "confidence": 0.65,
+          "sens_type": "ADDRESS"
+        }
+      ],
+      "unknown_format_fields": [
+        {
+          "field": "备注",
+          "non_empty_ratio": 0.8,
+          "value": "VIP客户",
+          "suggestion": "无法自动识别该字段内容格式，请在field_overrides中手动指定脱敏规则"
+        }
+      ]
+    },
+    {
+      "filepath": "D:\\trae-bz\\TraeProjects\\135\\test_data\\employees.json",
+      "format": "JSON",
+      "total_records": 3,
+      "total_fields": 8,
+      "records_with_sensitive": 3,
+      "sensitive_fields": {
+        "full_name": 6,
+        "mobile": 6,
+        "id_card": 9,
+        "email": 6,
+        "residence": 6,
+        "company": 6
+      },
+      "sens_type_counts": {
+        "NAME": 6,
+        "PHONE": 6,
+        "ID_CARD": 6,
+        "EMAIL": 6,
+        "ADDRESS": 6,
+        "COMPANY": 6,
+        "BANK_CARD": 3
+      },
+      "mask_strategy_counts": {
+        "default_retain": 6,
+        "retain": 15,
+        "random": 3
+      },
+      "risk_level_counts": {
+        "unknown": 6,
+        "normal": 15,
+        "high_safe": 3
+      },
+      "masked_cells": 24,
+      "whitelist_skipped_cells": 0,
+      "errors": [],
+      "warnings": [],
+      "low_confidence_items": [
+        {
+          "field": "id_card",
+          "row": 0,
+          "value": "120101197810152345",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "id_card",
+          "row": 1,
+          "value": "320102198504185678",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "id_card",
+          "row": 2,
+          "value": "370102198309221234",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "residence",
+          "row": 1,
+          "value": "南京市玄武区中山路18号德基广场写字楼2801",
+          "confidence": 0.6,
+          "sens_type": "ADDRESS"
+        },
+        {
+          "field": "residence",
+          "row": 2,
+          "value": "济南市历下区泉城路26号万达广场B座1805",
+          "confidence": 0.6,
+          "sens_type": "ADDRESS"
+        }
+      ],
+      "unknown_format_fields": [
+        {
+          "field": "emp_no",
+          "non_empty_ratio": 1.0,
+          "value": "E1001",
+          "suggestion": "无法自动识别该字段内容格式，请在field_overrides中手动指定脱敏规则"
+        },
+        {
+          "field": "unknown_col",
+          "non_empty_ratio": 1.0,
+          "value": "随机字符串ABC123",
+          "suggestion": "无法自动识别该字段内容格式，请在field_overrides中手动指定脱敏规则"
+        }
+      ]
+    },
+    {
+      "filepath": "D:\\trae-bz\\TraeProjects\\135\\test_data\\partners.xlsx",
+      "format": "Excel",
+      "total_records": 3,
+      "total_fields": 6,
+      "records_with_sensitive": 3,
+      "sensitive_fields": {
+        "contact_name": 6,
+        "phone": 6,
+        "id_number": 9,
+        "address": 6,
+        "company": 6
+      },
+      "sens_type_counts": {
+        "NAME": 6,
+        "PHONE": 6,
+        "ID_CARD": 6,
+        "ADDRESS": 6,
+        "COMPANY": 6,
+        "BANK_CARD": 3
+      },
+      "mask_strategy_counts": {
+        "default_retain": 3,
+        "retain": 12,
+        "random": 3
+      },
+      "risk_level_counts": {
+        "unknown": 3,
+        "normal": 12,
+        "high_safe": 3
+      },
+      "masked_cells": 18,
+      "whitelist_skipped_cells": 0,
+      "errors": [],
+      "warnings": [],
+      "low_confidence_items": [
+        {
+          "field": "id_number",
+          "row": 0,
+          "value": "350102199001012233",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "id_number",
+          "row": 1,
+          "value": "420106198908154455",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "id_number",
+          "row": 2,
+          "value": "500103199103206677",
+          "confidence": 0.75,
+          "sens_type": "BANK_CARD"
+        },
+        {
+          "field": "address",
+          "row": 0,
+          "value": "福州市鼓楼区五四路88号环球广场A栋2101",
+          "confidence": 0.65,
+          "sens_type": "ADDRESS"
+        },
+        {
+          "field": "address",
+          "row": 1,
+          "value": "武汉市武昌区中南路99号保利广场15楼",
+          "confidence": 0.65,
+          "sens_type": "ADDRESS"
+        }
+      ],
+      "unknown_format_fields": [
+        {
+          "field": "partner_id",
+          "non_empty_ratio": 1.0,
+          "value": "P001",
+          "suggestion": "无法自动识别该字段内容格式，请在field_overrides中手动指定脱敏规则"
+        }
+      ]
+    }
+  ],
+  "aggregate": {
+    "total_records": 11,
+    "total_masked_cells": 76,
+    "records_with_sensitive": 11,
+    "sensitive_type_counts": {
+      "NAME": 22,
+      "PHONE": 22,
+      "ID_CARD": 22,
+      "EMAIL": 16,
+      "ADDRESS": 22,
+      "COMPANY": 23,
+      "BANK_CARD": 11
+    },
+    "sensitive_field_counts": {
+      "姓名": 10,
+      "手机号": 10,
+      "身份证号": 15,
+      "邮箱": 10,
+      "地址": 11,
+      "公司名称": 10,
+      "full_name": 6,
+      "mobile": 6,
+      "id_card": 9,
+      "email": 6,
+      "residence": 6,
+      "company": 12,
+      "contact_name": 6,
+      "phone": 6,
+      "id_number": 9,
+      "address": 6
+    },
+    "strategy_counts": {
+      "whitelist_skip": 5,
+      "retain": 52,
+      "random": 11,
+      "default_retain": 13
+    },
+    "risk_level_counts": {
+      "normal": 58,
+      "high_safe": 11,
+      "unknown": 13
+    },
+    "errors": [],
+    "warnings": [],
+    "unknown_format_count": 4,
+    "low_confidence_count": 18
+  }
+}
