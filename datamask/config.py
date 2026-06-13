@@ -306,26 +306,12 @@ class MaskConfig:
                     "message": "字段同时在白名单和跳过列表中（不冲突，仅提示）",
                 })
 
-        for fname, meta in self.draft_field_meta.items():
-            if fname in field_status:
-                continue
-            status = meta.get("status", "CUSTOM")
-            if status == "NEED_MANUAL":
-                field_status[fname] = "NEED_MANUAL"
-                fields_need_manual += 1
-                issues.append({
-                    "level": "warning",
-                    "field": fname,
-                    "category": "manual",
-                    "message": meta.get("#提示") or meta.get("suggestion") or "该字段需要人工补充 sens_type 后才能使用",
-                })
-
         for fname, rule in self.field_overrides.items():
-            level = "ok"
             stype = rule.get("sens_type")
             strategy = rule.get("strategy")
             has_error = False
             has_warning = False
+            has_info = False
 
             if not stype:
                 issues.append({
@@ -344,40 +330,88 @@ class MaskConfig:
                 })
                 has_warning = True
 
+            type_rule = {}
+            if stype and stype in self.type_rules:
+                type_rule = self.type_rules[stype]
+
+            eff_strategy = strategy or type_rule.get("strategy", "retain")
             if strategy and strategy not in valid_strategies:
                 issues.append({
                     "level": "error",
                     "field": fname,
                     "category": "strategy",
-                    "message": f"策略 '{strategy}' 不合法",
+                    "message": f"策略 '{strategy}' 不合法，支持: retain/replace/random",
                 })
                 has_error = True
 
-            if strategy == "retain":
+            if eff_strategy == "retain":
                 ks = rule.get("keep_start")
                 ke = rule.get("keep_end")
-                if ks is not None:
+                type_ks = type_rule.get("keep_start")
+                type_ke = type_rule.get("keep_end")
+                if ks is None and ke is None:
+                    if type_ks is not None and type_ke is not None:
+                        issues.append({
+                            "level": "info",
+                            "field": fname,
+                            "category": "params",
+                            "message": f"未指定 keep_start/keep_end，从类型级 '{stype}' 继承: 保留前{type_ks}位、后{type_ke}位",
+                        })
+                        has_info = True
+                    else:
+                        issues.append({
+                            "level": "warning",
+                            "field": fname,
+                            "category": "params",
+                            "message": "retain 策略缺少 keep_start、keep_end 参数，且类型级也无默认值",
+                        })
+                        has_warning = True
+                elif ks is None or ke is None:
+                    missing = []
+                    if ks is None:
+                        missing.append("keep_start")
+                    if ke is None:
+                        missing.append("keep_end")
+                    issues.append({
+                        "level": "warning",
+                        "field": fname,
+                        "category": "params",
+                        "message": f"retain 策略缺少参数: {', '.join(missing)}",
+                    })
+                    has_warning = True
+                else:
                     try:
-                        int(ks)
+                        int(ks); int(ke)
                     except (TypeError, ValueError):
                         issues.append({
                             "level": "error",
                             "field": fname,
                             "category": "params",
-                            "message": "keep_start 必须为整数",
+                            "message": "keep_start / keep_end 必须为整数",
                         })
                         has_error = True
-                if ke is not None:
-                    try:
-                        int(ke)
-                    except (TypeError, ValueError):
+
+            if eff_strategy == "replace":
+                mc = rule.get("mask_char")
+                type_mc = type_rule.get("mask_char", "*")
+                if mc is None:
+                    if type_mc is not None:
                         issues.append({
-                            "level": "error",
+                            "level": "info",
                             "field": fname,
                             "category": "params",
-                            "message": "keep_end 必须为整数",
+                            "message": f"未指定 mask_char，从类型级 '{stype}' 继承: '{type_mc}'",
                         })
-                        has_error = True
+                        has_info = True
+                else:
+                    if not isinstance(mc, str) or len(mc) != 1:
+                        issues.append({
+                            "level": "warning",
+                            "field": fname,
+                            "category": "params",
+                            "message": "replace 策略的 mask_char 应为单个字符",
+                        })
+                        has_warning = True
 
             if fname in whitelist_set:
                 whitelist_conflicts += 1
@@ -398,6 +432,20 @@ class MaskConfig:
             else:
                 field_status[fname] = "OK"
                 fields_ok += 1
+
+        for fname, meta in self.draft_field_meta.items():
+            if fname in field_status:
+                continue
+            status = meta.get("status", "CUSTOM")
+            if status == "NEED_MANUAL":
+                field_status[fname] = "NEED_MANUAL"
+                fields_need_manual += 1
+                issues.append({
+                    "level": "warning",
+                    "field": fname,
+                    "category": "manual",
+                    "message": meta.get("#提示") or meta.get("suggestion") or "该字段需要人工补充 sens_type 后才能使用",
+                })
 
         valid = not any(i["level"] == "error" for i in issues)
 

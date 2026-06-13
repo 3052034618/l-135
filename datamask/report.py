@@ -202,13 +202,32 @@ class ReportGenerator:
             lines.append(f"- **脱敏单元格**: {fstat.masked_cells}")
             lines.append(f"- **白名单跳过单元格**: {fstat.whitelist_skipped_cells}")
 
-            if fstat.sensitive_fields:
+            if fstat.field_audit:
+                sens_audit = [a for a in fstat.field_audit if a.get("hit_count", 0) > 0]
+                if sens_audit:
+                    lines.append("\n**涉及敏感字段**:")
+                    lines.append("| 字段名 | 敏感类型 | 脱敏策略 | 命中次数 | 确认来源 |")
+                    lines.append("|-------|---------|---------|---------|---------|")
+                    status_label_map = {
+                        "CONFIRMED": "手工确认",
+                        "AUTO_OK": "自动识别",
+                        "NEED_MANUAL": "待人工补充",
+                        "SKIPPED": "已跳过",
+                        "WHITELIST": "白名单",
+                    }
+                    for a in sens_audit:
+                        stype = a.get("sens_type", "-")
+                        strategy = a.get("strategy", "-")
+                        hit = a.get("hit_count", 0)
+                        status = a.get("status", "UNKNOWN")
+                        source_label = status_label_map.get(status, status)
+                        lines.append(f"| `{a.get('field', '')}` | {stype} | {strategy} | {hit} | {source_label} |")
+            elif fstat.sensitive_fields:
                 lines.append("\n**涉及敏感字段**:")
-                lines.append("| 字段名 | 命中次数 | 主要敏感类型 |")
-                lines.append("|-------|---------|------------|")
+                lines.append("| 字段名 | 命中次数 |")
+                lines.append("|-------|---------|")
                 for field_name, cnt in fstat.sensitive_fields.most_common(10):
-                    primary_type = ""
-                    lines.append(f"| `{field_name}` | {cnt} | {primary_type} |")
+                    lines.append(f"| `{field_name}` | {cnt} |")
 
             if fstat.low_confidence_items:
                 lines.append(f"\n**低置信度项 ({len(fstat.low_confidence_items)} 项):**")
@@ -405,13 +424,70 @@ class ReportGenerator:
         return output_path
 
     @staticmethod
-    def generate_audit_detail(report: ProcessReport, output_path: str) -> str:
-        """生成字段级审计明细表（上架审批归档用）
+    def _build_audit_data(report: ProcessReport) -> List[Dict[str, Any]]:
+        """构建标准化的审计明细数据列表（扁平结构，方便生成多种格式）
 
-        按文件分组，列出每个字段的：字段名、敏感类型、脱敏策略、命中条数、
-        样例原值、样例脱敏值、确认方式（自动/手工/跳过/白名单）
+        Returns:
+            [{
+                "file": "employees.json",
+                "field": "name",
+                "sens_type": "NAME",
+                "sens_type_label": "姓名",
+                "strategy": "retain",
+                "hit_count": 100,
+                "masked_count": 100,
+                "sample_original": "张三",
+                "sample_masked": "张*",
+                "status": "CONFIRMED",
+                "status_label": "✅ 手工确认",
+            }, ...]
         """
         from .detector import SENSITIVE_TYPES
+
+        sens_type_labels = dict(SENSITIVE_TYPES)
+        status_labels = {
+            "CONFIRMED": "✅ 手工确认",
+            "AUTO_OK": "🤖 自动识别",
+            "NEED_MANUAL": "⚠️ 待人工补充",
+            "SKIPPED": "⏭️ 已跳过",
+            "WHITELIST": "📋 白名单",
+            "UNKNOWN": "❓ 未知",
+        }
+
+        rows = []
+        for fstat in sorted(report.files, key=lambda f: os.path.basename(f.filepath)):
+            if not fstat.field_audit:
+                continue
+            fname = os.path.basename(fstat.filepath)
+            for item in sorted(fstat.field_audit, key=lambda a: a.get("field", "")):
+                stype = item.get("sens_type", "-")
+                stype_label = sens_type_labels.get(stype, stype) if stype != "-" else "-"
+                strategy = item.get("strategy", "-") or "-"
+                hit_count = item.get("hit_count", 0)
+                masked_count = int(item.get("masked_count", 0)) or hit_count
+                status = item.get("status", "UNKNOWN")
+                status_label = status_labels.get(status, status)
+
+                rows.append({
+                    "file": fname,
+                    "filepath": fstat.filepath,
+                    "field": item.get("field", ""),
+                    "sens_type": stype,
+                    "sens_type_label": stype_label,
+                    "strategy": strategy,
+                    "hit_count": hit_count,
+                    "masked_count": masked_count,
+                    "sample_original": str(item.get("sample_original", ""))[:80],
+                    "sample_masked": str(item.get("sample_masked", ""))[:80],
+                    "status": status,
+                    "status_label": status_label,
+                })
+        return rows
+
+    @staticmethod
+    def generate_audit_detail(report: ProcessReport, output_path: str) -> str:
+        """生成字段级审计明细表（Markdown，上架审批归档用）"""
+        rows = ReportGenerator._build_audit_data(report)
 
         lines = []
         lines.append("# 数据脱敏处理 - 字段审计明细表\n")
@@ -422,60 +498,47 @@ class ReportGenerator:
         lines.append(f"- **配置文件**: `{report.config_used}`")
         lines.append(f"- **输出目录**: `{report.output_dir}`\n")
 
-        total_fields = 0
-        total_sensitive_fields = 0
-        total_masked_cells = 0
+        total_fields = len(rows)
+        total_sensitive_fields = sum(1 for r in rows if r["hit_count"] > 0)
+        total_masked_cells = sum(r["masked_count"] for r in rows)
+        unique_files = len(set(r["file"] for r in rows))
 
-        status_labels = {
-            "CONFIRMED": "✅ 手工确认",
-            "AUTO_OK": "🤖 自动识别",
-            "NEED_MANUAL": "⚠️ 待人工补充",
-            "SKIPPED": "⏭️ 已跳过",
-            "WHITELIST": "📋 白名单",
-            "UNKNOWN": "❓ 未知",
-        }
+        current_file = None
+        idx = 0
+        for row in rows:
+            if row["file"] != current_file:
+                if current_file is not None:
+                    lines.append("")
+                current_file = row["file"]
+                idx = 0
+                lines.append(f"## 📄 {current_file}\n")
+                for fstat in report.files:
+                    if os.path.basename(fstat.filepath) == current_file:
+                        lines.append(f"- 格式: {fstat.format}  记录数: {fstat.total_records}  "
+                                     f"敏感记录: {fstat.records_with_sensitive}  "
+                                     f"脱敏单元格: {fstat.masked_cells}")
+                        if fstat.output_path:
+                            lines.append(f"- 输出文件: `{fstat.output_path}`")
+                        break
+                lines.append("")
+                lines.append("| # | 字段名 | 敏感类型 | 脱敏策略 | 命中数 | 样例原值 | 样例脱敏值 | 确认方式 |")
+                lines.append("|---|-------|---------|---------|-------|---------|-----------|---------|")
 
-        sens_type_labels = dict(SENSITIVE_TYPES)
+            idx += 1
+            orig = row["sample_original"][:40]
+            masked = row["sample_masked"][:40]
+            lines.append(
+                f"| {idx} | `{row['field']}` | {row['sens_type_label']} | {row['strategy']} | "
+                f"{row['hit_count']} | `{orig}` | `{masked}` | {row['status_label']} |"
+            )
 
-        success_files = [f for f in report.files if f.field_audit]
-        for fstat in success_files:
-            fname = os.path.basename(fstat.filepath)
-            lines.append(f"## 📄 {fname}\n")
-            lines.append(f"- 格式: {fstat.format}  记录数: {fstat.total_records}  "
-                         f"敏感记录: {fstat.records_with_sensitive}  "
-                         f"脱敏单元格: {fstat.masked_cells}")
-            if fstat.output_path:
-                lines.append(f"- 输出文件: `{fstat.output_path}`")
-            lines.append("")
-
-            lines.append("| # | 字段名 | 敏感类型 | 脱敏策略 | 命中数 | 样例原值 | 样例脱敏值 | 确认方式 |")
-            lines.append("|---|-------|---------|---------|-------|---------|-----------|---------|")
-
-            for i, item in enumerate(fstat.field_audit, 1):
-                total_fields += 1
-                stype = item.get("sens_type", "-")
-                stype_label = sens_type_labels.get(stype, stype) if stype != "-" else "-"
-                strategy = item.get("strategy", "-") or "-"
-                hit_count = item.get("hit_count", 0)
-                if hit_count > 0:
-                    total_sensitive_fields += 1
-                    total_masked_cells += int(item.get("masked_count", 0)) or hit_count
-
-                orig = str(item.get("sample_original", ""))[:40]
-                masked = str(item.get("sample_masked", ""))[:40]
-                status = item.get("status", "UNKNOWN")
-                status_label = status_labels.get(status, status)
-
-                lines.append(
-                    f"| {i} | `{item.get('field', '')}` | {stype_label} | {strategy} | "
-                    f"{hit_count} | `{orig}` | `{masked}` | {status_label} |"
-                )
+        if rows:
             lines.append("")
 
         lines.append("## 📊 汇总统计\n")
         lines.append("| 指标 | 数值 |")
         lines.append("|-----|------|")
-        lines.append(f"| 审计文件数 | {len(success_files)} |")
+        lines.append(f"| 审计文件数 | {unique_files} |")
         lines.append(f"| 字段总数 | {total_fields} |")
         lines.append(f"| 敏感字段数 | {total_sensitive_fields} |")
         lines.append(f"| 脱敏单元格总数 | {total_masked_cells} |\n")
@@ -487,4 +550,35 @@ class ReportGenerator:
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(content)
+        return output_path
+
+    @staticmethod
+    def generate_audit_detail_csv(report: ProcessReport, output_path: str) -> str:
+        """生成字段级审计明细表（CSV，审批系统导入用）"""
+        import csv
+
+        rows = ReportGenerator._build_audit_data(report)
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "文件", "字段名", "敏感类型", "敏感类型(代码)",
+                "脱敏策略", "命中数", "脱敏数",
+                "样例原值", "样例脱敏值", "确认方式", "确认状态代码"
+            ])
+            for row in rows:
+                writer.writerow([
+                    row["file"],
+                    row["field"],
+                    row["sens_type_label"],
+                    row["sens_type"],
+                    row["strategy"],
+                    row["hit_count"],
+                    row["masked_count"],
+                    row["sample_original"],
+                    row["sample_masked"],
+                    row["status_label"],
+                    row["status"],
+                ])
         return output_path

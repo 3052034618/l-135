@@ -1,14 +1,14 @@
 {
-  "task_id": "3294c784de2e",
-  "started_at": 1781306937.942187,
-  "finished_at": 1781306937.9455142,
-  "duration": 0.0033271312713623047,
-  "operation": "report",
+  "task_id": "084b30c26c06",
+  "started_at": 1781308560.344859,
+  "finished_at": 1781308560.3472931,
+  "duration": 0.002434253692626953,
+  "operation": "mask",
   "total_files": 1,
   "success_files": 1,
   "failed_files": 0,
   "skipped_files": 0,
-  "output_dir": "D:\\trae-bz\\TraeProjects\\135\\test_data\\out_report",
+  "output_dir": "D:\\trae-bz\\TraeProjects\\135\\test_data\\out_mixed",
   "config_used": "test_data\\mixed_draft.yaml",
   "files": [
     {

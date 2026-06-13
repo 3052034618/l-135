@@ -1,16 +1,15 @@
 # 数据脱敏处理 - 字段审计明细表
 
-- **任务ID**: `553b6ef6ea86`
-- **操作类型**: `mask`
-- **执行时间**: 2026-06-13 07:27:42
+- **任务ID**: `ec9a34f502cc`
+- **操作类型**: `report`
+- **执行时间**: 2026-06-13 07:40:12
 - **耗时**: 0.00秒
 - **配置文件**: `test_data\mixed_draft.yaml`
-- **输出目录**: `D:\trae-bz\TraeProjects\135\test_data\out_mixed`
+- **输出目录**: `D:\trae-bz\TraeProjects\135\test_data\out_report`
 
 ## 📄 employees.json
 
 - 格式: JSON  记录数: 3  敏感记录: 3  脱敏单元格: 12
-- 输出文件: `D:\trae-bz\TraeProjects\135\test_data\out_mixed\employees_masked.json`
 
 | # | 字段名 | 敏感类型 | 脱敏策略 | 命中数 | 样例原值 | 样例脱敏值 | 确认方式 |
 |---|-------|---------|---------|-------|---------|-----------|---------|
@@ -33,4 +32,4 @@
 
 ---
 
-*生成于 2026-06-13 07:27:42 by DataMask Tool*
+*生成于 2026-06-13 07:40:12 by DataMask Tool*

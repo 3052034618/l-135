@@ -1,11 +1,11 @@
 # 数据脱敏处理 - 任务复核清单
 
-- **任务ID**: `3294c784de2e`
-- **操作类型**: `report`
-- **执行时间**: 2026-06-13 07:28:57
+- **任务ID**: `8d082ef0df72`
+- **操作类型**: `mask`
+- **执行时间**: 2026-06-13 07:52:14
 - **耗时**: 0.00秒
-- **配置文件**: `test_data\mixed_draft.yaml`
-- **输出目录**: `D:\trae-bz\TraeProjects\135\test_data\out_report`
+- **配置文件**: `test_data/mixed_draft.yaml`
+- **输出目录**: `D:\trae-bz\TraeProjects\135\test_data\out_test`
 
 ## 📊 总体概览
 
@@ -17,7 +17,7 @@
 | ⏭️  跳过(格式不支持) | 0 |
 | 处理记录总数 | 3 |
 | 含敏感记录数 | 3 |
-| 脱敏单元格总数 | 12 |
+| 脱敏单元格总数 | 15 |
 | ⚠️  待人工补规则字段 | 1 |
 | ⚠️  低置信度识别项 | 0 |
 
@@ -27,8 +27,9 @@
 
 | # | 源文件 | 格式 | 记录 | 敏感 | 脱敏单元格 | 输出文件 | 状态 |
 |---|-------|------|------|------|----------|---------|------|
-| 1 | `employees.json` | JSON | 3 | 3 | 12 | `(未生成)` | PREVIEW_OK |
+| 1 | `employees.json` | JSON | 3 | 3 | 15 | `employees_masked.json` | MASK_OK |
 
+- `test_data\employees.json` → `D:\trae-bz\TraeProjects\135\test_data\out_test\employees_masked.json`
 
 ### ⚠️  需要人工补规则的字段
 
@@ -38,9 +39,9 @@
 
 ## 📄 关联报告
 
-- 详细检查报告(Markdown): `D:\trae-bz\TraeProjects\135\test_data\out_report\_reports\report_3294c784de2e.md`
-- 详细检查报告(JSON): `D:\trae-bz\TraeProjects\135\test_data\out_report\_reports\report_3294c784de2e.json`
-- 规则配置来源: `test_data\mixed_draft.yaml`
+- 详细检查报告(Markdown): `D:\trae-bz\TraeProjects\135\test_data\out_test\_reports\report_8d082ef0df72.md`
+- 详细检查报告(JSON): `D:\trae-bz\TraeProjects\135\test_data\out_test\_reports\report_8d082ef0df72.json`
+- 规则配置来源: `test_data/mixed_draft.yaml`
 
 ## 📝 复核说明
 
@@ -52,4 +53,4 @@
 
 ---
 
-*清单生成于 2026-06-13 07:28:57 by DataMask Tool*
+*清单生成于 2026-06-13 07:52:14 by DataMask Tool*

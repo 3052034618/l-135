@@ -119,7 +119,9 @@ def _print_extra_outputs(extra: dict):
         ("report_json", "检查报告 (JSON)"),
         ("audit_detail", "审计明细表 (Markdown)"),
         ("audit_detail_md", "审计明细表 (Markdown)"),
+        ("audit_detail_csv", "审计明细表 (CSV)"),
         ("rule_draft", "规则草稿文件"),
+        ("approval_package", "审批归档包 (目录)"),
     ]
     rows = []
     seen_paths = set()
@@ -289,8 +291,10 @@ def scan_cmd(input_path, config_path, recursive, min_confidence, whitelist, json
               help="不生成报告文件")
 @click.option("--strict-draft", is_flag=True, default=False,
               help="严格草稿模式：仅处理草稿中 AUTO_OK 或手工配置的字段")
+@click.option("--approval-package", is_flag=True, default=False,
+              help="生成审批归档包：脱敏文件+报告+审计明细+配置+校验结果+总清单")
 def mask_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
-             min_confidence, whitelist, dry_run, no_report, strict_draft):
+             min_confidence, whitelist, dry_run, no_report, strict_draft, approval_package):
     """按规则脱敏处理文件并输出到指定目录
 
     批量处理输入文件，按保留位数、替换字符或随机映射方式脱敏敏感内容，
@@ -336,6 +340,7 @@ def mask_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
         recursive=recursive,
         dry_run=dry_run,
         report_formats=report_formats,
+        approval_package=approval_package,
     )
 
     for fstat in report.files:
@@ -391,8 +396,13 @@ def mask_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
               help="by-type 模式下每种敏感类型最多抽样条数")
 @click.option("--strict-draft", is_flag=True, default=False,
               help="严格草稿模式：仅处理草稿中 AUTO_OK 或手工配置的字段")
+@click.option("--only-fields", multiple=True,
+              help="只看指定字段，可多次指定 (如: --only-fields emp_no --only-fields phone)")
+@click.option("--only-types", multiple=True,
+              help="只看指定敏感类型，可多次指定 (如: --only-types PHONE --only-types ID_CARD)")
 def preview_cmd(input_path, config_path, recursive, strategy_opts,
-                min_confidence, whitelist, rows, preview_mode, per_type, strict_draft):
+                min_confidence, whitelist, rows, preview_mode, per_type, strict_draft,
+                only_fields, only_types):
     """展示脱敏前后的对比预览
 
     两种预览模式：
@@ -418,7 +428,14 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
     mode_label = f"前{rows}行逐列对比" if preview_mode == "rows" else f"按敏感类型汇总抽样 (每类最多{per_type}条)"
     click.echo(_c(f"👀 预览模式: {mode_label}", Fore.GREEN))
     click.echo(f"   输入: {_c(input_path, Fore.CYAN)}")
+    if only_fields:
+        click.echo(f"   字段筛选: {_c(', '.join(only_fields), Fore.LIGHTYELLOW_EX)}")
+    if only_types:
+        click.echo(f"   类型筛选: {_c(', '.join(only_types), Fore.LIGHTYELLOW_EX)}")
     click.echo()
+
+    only_fields_set = set(only_fields) if only_fields else set()
+    only_types_set = set(only_types) if only_types else set()
 
     if preview_mode == "by-type":
         global_samples: dict = {}
@@ -441,6 +458,16 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
                         display_fields.append(f)
                 if not display_fields:
                     display_fields = data.fields[:5]
+
+                if only_fields_set:
+                    display_fields = [f for f in display_fields if f in only_fields_set]
+                if only_types_set:
+                    display_fields = [f for f in display_fields
+                                      if field_types.get(f, "") in only_types_set
+                                      or f in whitelist]
+                if not display_fields and (only_fields_set or only_types_set):
+                    click.echo(_c("   （没有匹配筛选条件的字段）", Fore.LIGHTBLACK_EX))
+                    continue
 
                 for diff_row in diff_rows:
                     row_num = diff_row["__row__"]
@@ -469,8 +496,19 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
                 _print_unknown_format_hint(stat, fpath)
             else:
                 samples = processor.sample_by_sens_type(data, field_types, per_type=per_type)
-                if preview_mode == "by-type" and samples:
-                    for stype, entries in samples.items():
+
+                filtered_samples = {}
+                for stype, entries in samples.items():
+                    if only_types_set and stype not in only_types_set:
+                        continue
+                    if only_fields_set:
+                        entries = [e for e in entries if e.get("field") in only_fields_set]
+                        if not entries:
+                            continue
+                    filtered_samples[stype] = entries
+
+                if preview_mode == "by-type" and filtered_samples:
+                    for stype, entries in filtered_samples.items():
                         if stype not in global_samples:
                             global_samples[stype] = []
                         for e in entries[:per_type]:
@@ -478,10 +516,10 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
                             e2["source_file"] = os.path.basename(fpath)
                             global_samples[stype].append(e2)
 
-                if not samples:
-                    click.echo(_c("   未发现敏感数据", Fore.LIGHTBLACK_EX))
+                if not filtered_samples:
+                    click.echo(_c("   未发现匹配筛选条件的敏感数据", Fore.LIGHTBLACK_EX))
                 else:
-                    for stype, entries in samples.items():
+                    for stype, entries in filtered_samples.items():
                         label = TYPE_LABELS.get(stype, stype)
                         click.echo()
                         click.echo(_c(f"   ▣ {label} ({stype}) 共 {len(entries)} 条样例", Fore.MAGENTA))
@@ -547,6 +585,146 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
                 headers=["#", "文件", "字段", "原始", "脱敏后", "规则"],
                 tablefmt="simple", stralign="left"
             ))
+
+
+@cli.command("audit")
+@click.option("-i", "--input", "input_path", required=True, type=click.Path(),
+              help="输入文件或文件夹路径")
+@click.option("-c", "--config", "config_path", default=None, type=click.Path(),
+              help="自定义规则配置文件 (JSON)")
+@click.option("-r", "--recursive/--no-recursive", default=True,
+              help="递归处理子文件夹")
+@click.option("-s", "--strategy", "strategy_opts", multiple=True,
+              help="命令行覆写策略，格式: TYPE=strategy")
+@click.option("--min-confidence", type=float, default=None,
+              help="最小识别置信度阈值")
+@click.option("-w", "--whitelist", multiple=True, help="白名单字段")
+@click.option("--strict-draft", is_flag=True, default=False,
+              help="严格草稿模式：仅处理草稿中 AUTO_OK 或手工配置的字段")
+@click.option("--only-fields", multiple=True,
+              help="只看指定字段，可多次指定")
+@click.option("--only-types", multiple=True,
+              help="只看指定敏感类型，可多次指定")
+@click.option("--show-samples", is_flag=True, default=False,
+              help="显示样本原值和脱敏值")
+def audit_cmd(input_path, config_path, recursive, strategy_opts,
+              min_confidence, whitelist, strict_draft,
+              only_fields, only_types, show_samples):
+    """展示字段级审计明细
+
+    按文件+字段汇总审计信息，包括敏感类型、脱敏策略、命中数和状态来源，
+    适合上架前快速复核指定字段的处理口径。
+    """
+    _print_banner()
+    config = _load_config(config_path)
+    overrides = _parse_strategy_overrides(strategy_opts)
+    processor = DataProcessor(config, overrides, list(whitelist), min_confidence, strict_draft=strict_draft)
+
+    input_abs = os.path.abspath(input_path)
+    if not os.path.exists(input_abs):
+        click.echo(_c(f"❌ 输入路径不存在: {input_path}", Fore.RED), err=True)
+        sys.exit(1)
+
+    files = get_supported_files(input_path, recursive)
+    if not files:
+        click.echo(_c(f"⚠️  未找到支持的文件", Fore.YELLOW))
+        sys.exit(0)
+
+    click.echo(_c(f"🔍 审计模式: 字段级明细审计", Fore.GREEN))
+    click.echo(f"   输入: {_c(input_path, Fore.CYAN)}")
+    if only_fields:
+        click.echo(f"   字段筛选: {_c(', '.join(only_fields), Fore.LIGHTYELLOW_EX)}")
+    if only_types:
+        click.echo(f"   类型筛选: {_c(', '.join(only_types), Fore.LIGHTYELLOW_EX)}")
+    click.echo()
+
+    only_fields_set = set(only_fields) if only_fields else set()
+    only_types_set = set(only_types) if only_types else set()
+
+    all_audit = []
+    for fpath in files:
+        fname = os.path.basename(fpath)
+        try:
+            data, field_types, stat = processor.scan_file(fpath)
+            if not data.records:
+                continue
+
+            field_audit = processor._build_field_audit(data, field_types, stat)
+
+            for a in field_audit:
+                if only_fields_set and a["field"] not in only_fields_set:
+                    continue
+                if only_types_set and a.get("sens_type", "") not in only_types_set:
+                    continue
+                a2 = dict(a)
+                a2["file"] = fname
+                all_audit.append(a2)
+        except UnsupportedFormatError:
+            pass
+        except FileReadError:
+            pass
+        except Exception:
+            pass
+
+    all_audit.sort(key=lambda x: (x["file"], x["field"]))
+
+    if not all_audit:
+        click.echo(_c("   没有匹配的审计记录", Fore.LIGHTBLACK_EX))
+        return
+
+    prev_file = None
+    table = []
+    for a in all_audit:
+        f = a["file"]
+        if f != prev_file:
+            if prev_file is not None:
+                table.append(["---", "---", "---", "---", "---", "---"])
+            prev_file = f
+
+        stype = a.get("sens_type", "-")
+        stype_label = TYPE_LABELS.get(stype, stype) if stype != "-" else "-"
+        strategy = a.get("strategy", "-")
+        hit = a.get("hit_count", 0)
+        status = a.get("status", "")
+        source = a.get("source", "")
+
+        status_map = {
+            "CONFIRMED": "✅ 手工确认",
+            "AUTO_OK": "🤖 自动识别",
+            "NEED_MANUAL": "⚠️ 待补充",
+            "SKIPPED": "⏭️  跳过",
+            "WHITELIST": "📋 白名单",
+        }
+        status_label = status_map.get(status, status or source or "")
+
+        fname_col = _c(a["field"], Fore.WHITE)
+        stype_col = _c(stype_label, Fore.LIGHTMAGENTA_EX) if stype != "-" else stype_label
+        hit_col = _c(str(hit), Fore.YELLOW) if hit > 0 else str(hit)
+        status_col = _c(status_label, Fore.GREEN) if status in ("CONFIRMED", "AUTO_OK", "WHITELIST") else (
+            _c(status_label, Fore.RED) if status == "NEED_MANUAL" else _c(status_label, Fore.LIGHTBLACK_EX)
+        )
+
+        row = [fname_col, stype_col, strategy, hit_col, status_col]
+        if show_samples:
+            orig = str(a.get("sample_original", ""))[:20]
+            masked = str(a.get("sample_masked", ""))[:20]
+            row += [
+                _c(orig, Fore.RED) if orig else "",
+                _c(masked, Fore.GREEN) if masked else "",
+            ]
+        table.append(row)
+
+    headers = ["字段", "敏感类型", "脱敏策略", "命中数", "状态/来源"]
+    if show_samples:
+        headers += ["样本原值", "样本脱敏"]
+
+    click.echo(tabulate(
+        table,
+        headers=headers,
+        tablefmt="simple", stralign="left"
+    ))
+    click.echo()
+    click.echo(_c(f"共 {len(all_audit)} 条字段审计记录", Fore.LIGHTBLACK_EX))
 
 
 @cli.command("report")

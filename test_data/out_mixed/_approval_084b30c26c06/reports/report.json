@@ -1,8 +1,8 @@
 {
-  "task_id": "553b6ef6ea86",
-  "started_at": 1781306862.5930755,
-  "finished_at": 1781306862.5967484,
-  "duration": 0.0036728382110595703,
+  "task_id": "084b30c26c06",
+  "started_at": 1781308560.344859,
+  "finished_at": 1781308560.3472931,
+  "duration": 0.002434253692626953,
   "operation": "mask",
   "total_files": 1,
   "success_files": 1,

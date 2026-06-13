@@ -3,6 +3,7 @@
 主处理流程 - 协调检测、脱敏、报告
 """
 import os
+import time
 import traceback
 from collections import Counter
 from pathlib import Path
@@ -516,6 +517,167 @@ class DataProcessor:
                 return str(v)[:80]
         return ""
 
+    def _build_approval_package(self, report: ProcessReport, output_dir: str) -> str:
+        """构建审批包目录，包含脱敏文件、报告、审计明细、配置、校验结果和总清单
+
+        目录结构:
+            _approval_<task_id>/
+            ├── README.md                  # 总清单
+            ├── config/
+            │   ├── rules_config.yaml      # 使用的规则配置/草稿
+            │   └── validation_result.md   # 规则校验结果
+            ├── data/                      # 脱敏后的输出文件
+            └── reports/
+                ├── report.md              # 主报告
+                ├── report.json
+                ├── audit_detail.md        # 审计明细
+                ├── audit_detail.csv
+                └── summary.md             # 任务清单
+        """
+        import shutil
+
+        task_id = report.task_id
+        pkg_root = os.path.join(output_dir, f"_approval_{task_id}")
+        os.makedirs(pkg_root, exist_ok=True)
+
+        data_dir = os.path.join(pkg_root, "data")
+        reports_dir = os.path.join(pkg_root, "reports")
+        config_dir = os.path.join(pkg_root, "config")
+        os.makedirs(data_dir, exist_ok=True)
+        os.makedirs(reports_dir, exist_ok=True)
+        os.makedirs(config_dir, exist_ok=True)
+
+        extra = report.extra_outputs or {}
+
+        copied_files = []
+
+        for fstat in report.files:
+            if fstat.output_path and os.path.exists(fstat.output_path):
+                dst = os.path.join(data_dir, os.path.basename(fstat.output_path))
+                shutil.copy2(fstat.output_path, dst)
+                copied_files.append(("data", os.path.basename(fstat.output_path), fstat.output_path))
+
+        report_files_map = {
+            "report.md": extra.get("md_report", ""),
+            "report.json": extra.get("json_report", ""),
+            "audit_detail.md": extra.get("audit_detail", ""),
+            "audit_detail.csv": extra.get("audit_detail_csv", ""),
+            "summary.md": extra.get("task_summary", ""),
+        }
+        for dst_name, src_path in report_files_map.items():
+            if src_path and os.path.exists(src_path):
+                dst = os.path.join(reports_dir, dst_name)
+                shutil.copy2(src_path, dst)
+                copied_files.append(("reports", dst_name, src_path))
+
+        config_src = self.config.source_file
+        if config_src and os.path.exists(config_src):
+            dst = os.path.join(config_dir, "rules_config.yaml")
+            shutil.copy2(config_src, dst)
+            copied_files.append(("config", "rules_config.yaml", config_src))
+
+        validation_path = os.path.join(config_dir, "validation_result.md")
+        try:
+            vr = self.config.validate()
+            lines = []
+            lines.append("# 规则配置校验结果\n")
+            lines.append(f"- **校验时间**: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            lines.append(f"- **配置文件**: `{config_src or '内置默认'}`")
+            lines.append(f"- **整体结论**: {'✅ 通过' if vr['valid'] else '❌ 未通过'}\n")
+
+            stats = vr["stats"]
+            lines.append("## 📊 统计概览\n")
+            lines.append("| 指标 | 数值 |")
+            lines.append("|-----|------|")
+            lines.append(f"| 类型规则 | {stats.get('type_rules_ok', 0)}/{stats.get('type_rules_total', 0)} 有效 |")
+            lines.append(f"| 字段规则 - 可用 | {stats.get('fields_ok', 0)} |")
+            lines.append(f"| 字段规则 - 警告 | {stats.get('fields_warning', 0)} |")
+            lines.append(f"| 字段规则 - 错误 | {stats.get('fields_error', 0)} |")
+            lines.append(f"| 字段规则 - 已跳过 | {stats.get('fields_skipped', 0)} |")
+            lines.append(f"| 字段规则 - 待人工补充 | {stats.get('fields_need_manual', 0)} |")
+            lines.append(f"| 白名单字段 | {stats.get('whitelist_count', 0)} |")
+            lines.append(f"| 白名单冲突 | {stats.get('whitelist_conflicts', 0)} |\n")
+
+            issues = vr.get("issues", [])
+            if issues:
+                lines.append("## 🔔 问题清单\n")
+                level_map = {"error": "❌ 错误", "warning": "⚠️ 警告", "info": "ℹ️ 提示"}
+                for issue in issues:
+                    level = issue.get("level", "info")
+                    cat = issue.get("category", "")
+                    field = issue.get("field", "")
+                    msg = issue.get("message", "")
+                    label = level_map.get(level, level)
+                    lines.append(f"### {label} [{cat}] `{field}`\n")
+                    lines.append(f"{msg}\n")
+
+            with open(validation_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            copied_files.append(("config", "validation_result.md", validation_path))
+        except Exception as e:
+            with open(validation_path, "w", encoding="utf-8") as f:
+                f.write(f"# 规则校验结果\n\n校验失败: {e}\n")
+            copied_files.append(("config", "validation_result.md", validation_path))
+
+        readme_path = os.path.join(pkg_root, "README.md")
+        lines = []
+        lines.append("# 数据脱敏审批包\n")
+        lines.append(f"- **任务ID**: `{task_id}`")
+        lines.append(f"- **操作类型**: `{report.operation}`")
+        lines.append(f"- **生成时间**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(report.started_at))}")
+        lines.append(f"- **耗时**: {report.duration:.2f}秒")
+        lines.append(f"- **配置文件**: `{config_src or '内置默认'}`")
+        lines.append(f"- **输出目录**: `{output_dir}`\n")
+
+        agg = report.aggregate or {}
+        lines.append("## 📊 总体统计\n")
+        lines.append("| 指标 | 数值 |")
+        lines.append("|-----|------|")
+        lines.append(f"| 处理文件数 | {report.total_files} |")
+        lines.append(f"| 成功 | {report.success_files} |")
+        lines.append(f"| 失败 | {report.failed_files} |")
+        lines.append(f"| 处理记录数 | {agg.get('total_records', 0)} |")
+        lines.append(f"| 含敏感记录数 | {agg.get('records_with_sensitive', 0)} |")
+        lines.append(f"| 脱敏单元格总数 | {agg.get('total_masked_cells', 0)} |\n")
+
+        lines.append("## 📁 文件清单\n")
+        lines.append("### 脱敏数据 (data/)\n")
+        data_files = [name for category, name, _ in copied_files if category == "data"]
+        if data_files:
+            for name in sorted(data_files):
+                lines.append(f"- `data/{name}`")
+        else:
+            lines.append("_（无输出数据文件）_")
+        lines.append("")
+
+        lines.append("### 检查报告 (reports/)\n")
+        report_files = [name for category, name, _ in copied_files if category == "reports"]
+        for name in sorted(report_files):
+            lines.append(f"- `reports/{name}`")
+        lines.append("")
+
+        lines.append("### 规则配置 (config/)\n")
+        config_files = [name for category, name, _ in copied_files if category == "config"]
+        for name in sorted(config_files):
+            lines.append(f"- `config/{name}`")
+        lines.append("")
+
+        lines.append("## 📝 使用说明\n")
+        lines.append(
+            "1. 打开 `data/` 目录，抽样检查各脱敏文件效果是否符合要求；\n"
+            "2. 查看 `reports/report.md` 了解整体脱敏统计和风险项；\n"
+            "3. 查看 `reports/audit_detail.md` 或 `.csv` 逐字段核对处理口径；\n"
+            "4. 查看 `config/validation_result.md` 确认规则校验状态；\n"
+            "5. 全部确认无误后，将本目录整体压缩提交上架审批。\n"
+        )
+        lines.append("---\n")
+        lines.append(f"*审批包生成于 {time.strftime('%Y-%m-%d %H:%M:%S')} by DataMask Tool*")
+
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        return pkg_root
+
     def build_rule_draft(
         self,
         filepath: Optional[str] = None,
@@ -650,6 +812,7 @@ class DataProcessor:
         dry_run: bool = False,
         report_formats: Tuple[str, ...] = ("markdown", "json"),
         progress_cb: Optional[Callable] = None,
+        approval_package: bool = False,
     ) -> ProcessReport:
         """处理整个文件夹"""
         output_dir = os.path.abspath(output_dir)
@@ -772,9 +935,12 @@ class DataProcessor:
                 )
 
         audit_detail_path = ""
+        audit_detail_csv_path = ""
         if report_dir:
             audit_detail_path = os.path.join(report_dir, f"audit_detail_{task_stamp}.md")
             ReportGenerator.generate_audit_detail(report, audit_detail_path)
+            audit_detail_csv_path = os.path.join(report_dir, f"audit_detail_{task_stamp}.csv")
+            ReportGenerator.generate_audit_detail_csv(report, audit_detail_csv_path)
 
         report.extra_outputs = {
             "report_dir": report_dir,
@@ -782,7 +948,12 @@ class DataProcessor:
             "json_report": json_report_path,
             "task_summary": summary_path,
             "audit_detail": audit_detail_path,
+            "audit_detail_csv": audit_detail_csv_path,
             "task_id": task_stamp,
         }
+
+        if approval_package and output_dir:
+            pkg_path = self._build_approval_package(report, output_dir)
+            report.extra_outputs["approval_package"] = pkg_path
 
         return report
