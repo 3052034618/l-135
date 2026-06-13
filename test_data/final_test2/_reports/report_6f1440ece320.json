@@ -1,0 +1,96 @@
+{
+  "task_id": "6f1440ece320",
+  "started_at": 1781311312.7892535,
+  "finished_at": 1781311312.790915,
+  "duration": 0.001661539077758789,
+  "operation": "report",
+  "total_files": 1,
+  "success_files": 1,
+  "failed_files": 0,
+  "skipped_files": 0,
+  "output_dir": "D:\\trae-bz\\TraeProjects\\135\\test_data\\final_test2",
+  "config_used": "test_data\\field_strategy_test.yaml",
+  "files": [
+    {
+      "filepath": "D:\\trae-bz\\TraeProjects\\135\\test_data\\employees.json",
+      "format": "JSON",
+      "total_records": 3,
+      "total_fields": 7,
+      "records_with_sensitive": 3,
+      "sensitive_fields": {
+        "name": 3,
+        "phone": 3,
+        "id_card": 3,
+        "email": 3
+      },
+      "sens_type_counts": {
+        "NAME": 3,
+        "PHONE": 3,
+        "ID_CARD": 3,
+        "EMAIL": 3
+      },
+      "mask_strategy_counts": {
+        "retain": 9,
+        "replace": 3
+      },
+      "risk_level_counts": {
+        "ignored": 9,
+        "normal": 12
+      },
+      "masked_cells": 12,
+      "whitelist_skipped_cells": 0,
+      "errors": [],
+      "warnings": [],
+      "low_confidence_items": [],
+      "unknown_format_fields": [
+        {
+          "field": "emp_no",
+          "non_empty_ratio": 1.0,
+          "value": "E1001",
+          "suggestion": "无法自动识别该字段内容格式，请在field_overrides中手动指定脱敏规则"
+        },
+        {
+          "field": "备注",
+          "non_empty_ratio": 1.0,
+          "value": "VIP客户，优先处理",
+          "suggestion": "无法自动识别该字段内容格式，请在field_overrides中手动指定脱敏规则"
+        },
+        {
+          "field": "unknown_col",
+          "non_empty_ratio": 1.0,
+          "value": "随机字符串ABC123",
+          "suggestion": "无法自动识别该字段内容格式，请在field_overrides中手动指定脱敏规则"
+        }
+      ]
+    }
+  ],
+  "aggregate": {
+    "total_records": 3,
+    "total_masked_cells": 12,
+    "records_with_sensitive": 3,
+    "sensitive_type_counts": {
+      "NAME": 3,
+      "PHONE": 3,
+      "ID_CARD": 3,
+      "EMAIL": 3
+    },
+    "sensitive_field_counts": {
+      "name": 3,
+      "phone": 3,
+      "id_card": 3,
+      "email": 3
+    },
+    "strategy_counts": {
+      "retain": 9,
+      "replace": 3
+    },
+    "risk_level_counts": {
+      "ignored": 9,
+      "normal": 12
+    },
+    "errors": [],
+    "warnings": [],
+    "unknown_format_count": 3,
+    "low_confidence_count": 0
+  }
+}

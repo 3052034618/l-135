@@ -1,0 +1,8 @@
+﻿文件,字段名,敏感类型,敏感类型(代码),脱敏策略,命中数,脱敏数,样例原值,样例脱敏值,确认方式,确认状态代码
+employees.json,email,电子邮箱,EMAIL,retain,3,3,zhangwei@example.com,zha*************.com,🤖 自动识别,AUTO_OK
+employees.json,emp_no,手机号,PHONE,retain,3,3,E1001,E**01,✅ 手工确认,CONFIRMED
+employees.json,id_card,身份证号,ID_CARD,retain,3,3,110101199003078888,110***********8888,🤖 自动识别,AUTO_OK
+employees.json,name,-,-,-,0,0,张伟,张伟,⏭️ 已跳过,SKIPPED
+employees.json,phone,手机号,PHONE,retain,3,3,13800138001,138****8001,🤖 自动识别,AUTO_OK
+employees.json,unknown_col,-,-,-,0,0,随机字符串ABC123,随机字符串ABC123,⏭️ 已跳过,SKIPPED
+employees.json,备注,-,-,-,0,0,VIP客户，优先处理,VIP客户，优先处理,⚠️ 待人工补充,NEED_MANUAL

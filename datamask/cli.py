@@ -400,9 +400,12 @@ def mask_cmd(input_path, output_dir, config_path, recursive, strategy_opts,
               help="只看指定字段，可多次指定 (如: --only-fields emp_no --only-fields phone)")
 @click.option("--only-types", multiple=True,
               help="只看指定敏感类型，可多次指定 (如: --only-types PHONE --only-types ID_CARD)")
+@click.option("--only-status", multiple=True,
+              type=click.Choice(["CONFIRMED", "AUTO_OK", "NEED_MANUAL", "SKIPPED", "WHITELIST"]),
+              help="只看指定确认状态，可多次指定")
 def preview_cmd(input_path, config_path, recursive, strategy_opts,
                 min_confidence, whitelist, rows, preview_mode, per_type, strict_draft,
-                only_fields, only_types):
+                only_fields, only_types, only_status):
     """展示脱敏前后的对比预览
 
     两种预览模式：
@@ -432,13 +435,23 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
         click.echo(f"   字段筛选: {_c(', '.join(only_fields), Fore.LIGHTYELLOW_EX)}")
     if only_types:
         click.echo(f"   类型筛选: {_c(', '.join(only_types), Fore.LIGHTYELLOW_EX)}")
+    if only_status:
+        status_labels = {
+            "CONFIRMED": "手工确认", "AUTO_OK": "自动识别", "NEED_MANUAL": "待补充",
+            "SKIPPED": "已跳过", "WHITELIST": "白名单"
+        }
+        labels = [status_labels.get(s, s) for s in only_status]
+        click.echo(f"   状态筛选: {_c(', '.join(labels), Fore.LIGHTYELLOW_EX)}")
     click.echo()
 
     only_fields_set = set(only_fields) if only_fields else set()
     only_types_set = set(only_types) if only_types else set()
+    only_status_set = set(only_status) if only_status else set()
 
     if preview_mode == "by-type":
         global_samples: dict = {}
+
+    any_matched = False
 
     for fpath in files:
         click.echo(_c(f"{'=' * 70}", Fore.LIGHTCYAN_EX))
@@ -448,6 +461,9 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
             if not data.records:
                 click.echo(_c("   (空文件)", Fore.LIGHTBLACK_EX))
                 continue
+
+            field_audit = processor._build_field_audit(data, field_types, stat)
+            field_status_map = {a["field"]: a["status"] for a in field_audit}
 
             if preview_mode == "rows":
                 diff_rows = processor.preview_diff(data, field_types, rows)
@@ -465,9 +481,13 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
                     display_fields = [f for f in display_fields
                                       if field_types.get(f, "") in only_types_set
                                       or f in whitelist]
-                if not display_fields and (only_fields_set or only_types_set):
+                if only_status_set:
+                    display_fields = [f for f in display_fields
+                                      if field_status_map.get(f, "") in only_status_set]
+                if not display_fields:
                     click.echo(_c("   （没有匹配筛选条件的字段）", Fore.LIGHTBLACK_EX))
                     continue
+                any_matched = True
 
                 for diff_row in diff_rows:
                     row_num = diff_row["__row__"]
@@ -505,6 +525,11 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
                         entries = [e for e in entries if e.get("field") in only_fields_set]
                         if not entries:
                             continue
+                    if only_status_set:
+                        entries = [e for e in entries
+                                   if field_status_map.get(e.get("field", ""), "") in only_status_set]
+                        if not entries:
+                            continue
                     filtered_samples[stype] = entries
 
                 if preview_mode == "by-type" and filtered_samples:
@@ -519,6 +544,7 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
                 if not filtered_samples:
                     click.echo(_c("   未发现匹配筛选条件的敏感数据", Fore.LIGHTBLACK_EX))
                 else:
+                    any_matched = True
                     for stype, entries in filtered_samples.items():
                         label = TYPE_LABELS.get(stype, stype)
                         click.echo()
@@ -586,6 +612,10 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
                 tablefmt="simple", stralign="left"
             ))
 
+    if (only_fields_set or only_types_set or only_status_set) and not any_matched:
+        click.echo(_c("⚠️  没有找到匹配筛选条件的任何字段", Fore.YELLOW))
+        click.echo()
+
 
 @cli.command("audit")
 @click.option("-i", "--input", "input_path", required=True, type=click.Path(),
@@ -605,11 +635,14 @@ def preview_cmd(input_path, config_path, recursive, strategy_opts,
               help="只看指定字段，可多次指定")
 @click.option("--only-types", multiple=True,
               help="只看指定敏感类型，可多次指定")
+@click.option("--only-status", multiple=True,
+              type=click.Choice(["CONFIRMED", "AUTO_OK", "NEED_MANUAL", "SKIPPED", "WHITELIST"]),
+              help="只看指定确认状态，可多次指定")
 @click.option("--show-samples", is_flag=True, default=False,
               help="显示样本原值和脱敏值")
 def audit_cmd(input_path, config_path, recursive, strategy_opts,
               min_confidence, whitelist, strict_draft,
-              only_fields, only_types, show_samples):
+              only_fields, only_types, only_status, show_samples):
     """展示字段级审计明细
 
     按文件+字段汇总审计信息，包括敏感类型、脱敏策略、命中数和状态来源，
@@ -636,10 +669,18 @@ def audit_cmd(input_path, config_path, recursive, strategy_opts,
         click.echo(f"   字段筛选: {_c(', '.join(only_fields), Fore.LIGHTYELLOW_EX)}")
     if only_types:
         click.echo(f"   类型筛选: {_c(', '.join(only_types), Fore.LIGHTYELLOW_EX)}")
+    if only_status:
+        status_labels = {
+            "CONFIRMED": "手工确认", "AUTO_OK": "自动识别", "NEED_MANUAL": "待补充",
+            "SKIPPED": "已跳过", "WHITELIST": "白名单"
+        }
+        labels = [status_labels.get(s, s) for s in only_status]
+        click.echo(f"   状态筛选: {_c(', '.join(labels), Fore.LIGHTYELLOW_EX)}")
     click.echo()
 
     only_fields_set = set(only_fields) if only_fields else set()
     only_types_set = set(only_types) if only_types else set()
+    only_status_set = set(only_status) if only_status else set()
 
     all_audit = []
     for fpath in files:
@@ -656,6 +697,8 @@ def audit_cmd(input_path, config_path, recursive, strategy_opts,
                     continue
                 if only_types_set and a.get("sens_type", "") not in only_types_set:
                     continue
+                if only_status_set and a.get("status", "") not in only_status_set:
+                    continue
                 a2 = dict(a)
                 a2["file"] = fname
                 all_audit.append(a2)
@@ -669,7 +712,10 @@ def audit_cmd(input_path, config_path, recursive, strategy_opts,
     all_audit.sort(key=lambda x: (x["file"], x["field"]))
 
     if not all_audit:
-        click.echo(_c("   没有匹配的审计记录", Fore.LIGHTBLACK_EX))
+        if only_fields_set or only_types_set or only_status_set:
+            click.echo(_c("⚠️  没有找到匹配筛选条件的任何字段", Fore.YELLOW))
+        else:
+            click.echo(_c("   没有匹配的审计记录", Fore.LIGHTBLACK_EX))
         return
 
     prev_file = None
@@ -725,6 +771,177 @@ def audit_cmd(input_path, config_path, recursive, strategy_opts,
     ))
     click.echo()
     click.echo(_c(f"共 {len(all_audit)} 条字段审计记录", Fore.LIGHTBLACK_EX))
+
+
+def _find_audit_csv(directory: str) -> Optional[str]:
+    """在目录中查找 audit_detail.csv，支持输出目录和审批包结构"""
+    search_paths = [
+        os.path.join(directory, "_reports"),
+        os.path.join(directory, "reports"),
+        directory,
+    ]
+    for sp in search_paths:
+        if not os.path.isdir(sp):
+            continue
+        for f in os.listdir(sp):
+            if f.startswith("audit_detail") and f.endswith(".csv"):
+                return os.path.join(sp, f)
+    return None
+
+
+def _parse_audit_csv(csv_path: str) -> Dict[str, Dict[str, Any]]:
+    """解析 audit_detail.csv，返回以 (file, field) 为 key 的 dict"""
+    import csv
+    result = {}
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            key = (row.get("文件", ""), row.get("字段名", ""))
+            result[key] = {
+                "file": row.get("文件", ""),
+                "field": row.get("字段名", ""),
+                "sens_type": row.get("敏感类型(代码)", ""),
+                "sens_type_label": row.get("敏感类型", ""),
+                "strategy": row.get("脱敏策略", ""),
+                "hit_count": int(row.get("命中数", "0") or "0"),
+                "masked_count": int(row.get("脱敏数", "0") or "0"),
+                "source": row.get("确认方式", ""),
+                "status_code": row.get("确认状态代码", ""),
+            }
+    return result
+
+
+@cli.command("compare")
+@click.argument("dir1", type=click.Path(exists=True))
+@click.argument("dir2", type=click.Path(exists=True))
+@click.option("--only-changes", is_flag=True, default=False,
+              help="只显示有变化的字段")
+def compare_cmd(dir1, dir2, only_changes):
+    """对比两次输出目录或审批包的字段级差异
+
+    对比字段的命中数、脱敏数、敏感类型、脱敏策略和确认来源，
+    方便运营复核规则调整前后的差异。
+    """
+    _print_banner()
+
+    csv1 = _find_audit_csv(dir1)
+    csv2 = _find_audit_csv(dir2)
+
+    if not csv1:
+        click.echo(_c(f"❌ 在 {dir1} 中未找到 audit_detail.csv", Fore.RED), err=True)
+        sys.exit(1)
+    if not csv2:
+        click.echo(_c(f"❌ 在 {dir2} 中未找到 audit_detail.csv", Fore.RED), err=True)
+        sys.exit(1)
+
+    click.echo(_c(f"🔍 对比模式: 字段级差异对比", Fore.GREEN))
+    click.echo(f"   目录1: {_c(dir1, Fore.CYAN)}")
+    click.echo(f"   目录2: {_c(dir2, Fore.CYAN)}")
+    click.echo(f"   CSV1: {os.path.basename(csv1)}")
+    click.echo(f"   CSV2: {os.path.basename(csv2)}")
+    click.echo()
+
+    data1 = _parse_audit_csv(csv1)
+    data2 = _parse_audit_csv(csv2)
+
+    all_keys = sorted(set(data1.keys()) | set(data2.keys()),
+                      key=lambda x: (x[0], x[1]))
+
+    changes = []
+    unchanged = []
+    only_in_1 = []
+    only_in_2 = []
+
+    for key in all_keys:
+        d1 = data1.get(key)
+        d2 = data2.get(key)
+        if d1 and not d2:
+            only_in_1.append(key)
+        elif d2 and not d1:
+            only_in_2.append(key)
+        else:
+            changed = False
+            for col in ["sens_type", "strategy", "source", "status_code"]:
+                if d1.get(col) != d2.get(col):
+                    changed = True
+                    break
+            if d1.get("hit_count") != d2.get("hit_count"):
+                changed = True
+            if d1.get("masked_count") != d2.get("masked_count"):
+                changed = True
+            if changed:
+                changes.append((key, d1, d2))
+            else:
+                unchanged.append(key)
+
+    if only_changes:
+        click.echo(_c("   （仅显示有变化的字段）", Fore.LIGHTBLACK_EX))
+        click.echo()
+
+    if changes:
+        click.echo(_c(f"⚠️  发现 {len(changes)} 处字段级差异:", Fore.YELLOW))
+        click.echo()
+        table = []
+        for key, d1, d2 in changes:
+            f, fname = key
+            diff_parts = []
+            if d1["sens_type"] != d2["sens_type"]:
+                v1 = d1["sens_type_label"] or d1["sens_type"]
+                v2 = d2["sens_type_label"] or d2["sens_type"]
+                diff_parts.append(f"类型:{v1}→{v2}")
+            if d1["strategy"] != d2["strategy"]:
+                diff_parts.append(f"策略:{d1['strategy']}→{d2['strategy']}")
+            if d1["hit_count"] != d2["hit_count"]:
+                diff_parts.append(f"命中:{d1['hit_count']}→{d2['hit_count']}")
+            if d1["masked_count"] != d2["masked_count"]:
+                diff_parts.append(f"脱敏:{d1['masked_count']}→{d2['masked_count']}")
+            if d1["source"] != d2["source"]:
+                diff_parts.append(f"来源:{d1['source']}→{d2['source']}")
+            diff_str = ", ".join(diff_parts)
+            table.append([
+                _c(f, Fore.CYAN),
+                _c(fname, Fore.WHITE),
+                _c(diff_str, Fore.YELLOW),
+            ])
+        click.echo(tabulate(
+            table,
+            headers=["文件", "字段", "差异"],
+            tablefmt="simple", stralign="left"
+        ))
+        click.echo()
+
+    if only_in_1:
+        click.echo(_c(f"➖ 仅在目录1中存在 ({len(only_in_1)} 个):", Fore.LIGHTRED_EX))
+        for key in only_in_1:
+            f, fname = key
+            click.echo(f"  • {_c(f, Fore.CYAN)}: `{fname}`")
+        click.echo()
+
+    if only_in_2:
+        click.echo(_c(f"➕ 仅在目录2中存在 ({len(only_in_2)} 个):", Fore.LIGHTGREEN_EX))
+        for key in only_in_2:
+            f, fname = key
+            click.echo(f"  • {_c(f, Fore.CYAN)}: `{fname}`")
+        click.echo()
+
+    if not only_changes and unchanged:
+        click.echo(_c(f"✅ 无变化字段 ({len(unchanged)} 个):", Fore.LIGHTBLACK_EX))
+        for key in unchanged[:20]:
+            f, fname = key
+            click.echo(f"  • {_c(f, Fore.CYAN)}: `{fname}`")
+        if len(unchanged) > 20:
+            click.echo(f"  ... 还有 {len(unchanged) - 20} 个字段无变化")
+        click.echo()
+
+    if not changes and not only_in_1 and not only_in_2:
+        click.echo(_c("✅ 两份输出完全一致，没有任何差异", Fore.GREEN))
+        click.echo()
+    else:
+        click.echo(_c(f"📊 汇总: {len(changes)} 处变化, "
+                      f"{len(only_in_1)} 个仅在1, "
+                      f"{len(only_in_2)} 个仅在2, "
+                      f"{len(unchanged)} 个无变化",
+                      Fore.LIGHTBLACK_EX))
 
 
 @cli.command("report")

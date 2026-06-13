@@ -23,6 +23,18 @@ from .config import MaskConfig
 from .report import ProcessReport, FileProcessStat, ReportGenerator
 
 
+TYPE_LABELS = {
+    "PHONE": "手机号",
+    "ID_CARD": "身份证号",
+    "BANK_CARD": "银行卡号",
+    "NAME": "姓名",
+    "EMAIL": "电子邮箱",
+    "COMPANY": "企业名称",
+    "ADDRESS": "地址",
+    "FIELD": "自定义字段",
+}
+
+
 def get_output_path(input_path: str, input_root: str, output_dir: str,
                     suffix: str = "_masked") -> str:
     input_path = os.path.abspath(input_path)
@@ -456,13 +468,34 @@ class DataProcessor:
                 if rule:
                     strategy = rule.strategy
 
-            has_manual_config = False
-            if self.config.draft_field_meta and fname in self.config.draft_field_meta:
-                pass
-            elif fname in self.config.field_overrides:
-                has_manual_config = True
+            if fname in self.config.field_overrides:
+                field_rule = self.config.field_overrides[fname]
+                if "strategy" in field_rule:
+                    strategy = field_rule["strategy"]
+                elif stype:
+                    type_rule = self.engine.rules.get(stype)
+                    if type_rule:
+                        strategy = type_rule.strategy
 
-            if meta_status == "CONFIRMED_MANUAL" or has_manual_config:
+            has_manual_config = False
+            if fname in self.config.field_overrides:
+                field_rule = self.config.field_overrides[fname]
+                draft_meta = self.config.draft_field_meta.get(fname, {})
+                draft_status = draft_meta.get("status", "")
+
+                if draft_status == "CONFIRMED_MANUAL":
+                    has_manual_config = True
+                elif draft_status == "NEED_MANUAL":
+                    has_manual_config = True
+                elif draft_status == "AUTO_OK":
+                    if "strategy" in field_rule:
+                        has_manual_config = True
+                    elif "sens_type" in field_rule and "detected_type" in draft_meta and field_rule["sens_type"] != draft_meta["detected_type"]:
+                        has_manual_config = True
+                elif not draft_status:
+                    has_manual_config = True
+
+            if has_manual_config or meta_status == "CONFIRMED_MANUAL":
                 source = "manual"
                 status = "CONFIRMED"
             elif meta_status == "AUTO_OK":
@@ -675,6 +708,141 @@ class DataProcessor:
 
         with open(readme_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
+
+        review_path = os.path.join(pkg_root, "REVIEW.md")
+        review_lines = []
+        review_lines.append("# 🎯 运营复核首页\n")
+        review_lines.append(f"> 任务ID: `{task_id}` | 操作: `{report.operation}` | 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(report.started_at))}\n")
+
+        all_audit = []
+        for fstat in report.files:
+            if fstat.field_audit:
+                for a in fstat.field_audit:
+                    a2 = dict(a)
+                    a2["file"] = os.path.basename(fstat.filepath)
+                    all_audit.append(a2)
+
+        status_counts: Dict[str, int] = {}
+        sens_type_counts: Dict[str, int] = {}
+        manual_fields = []
+        need_manual_fields = []
+        skipped_fields = []
+        auto_fields = []
+
+        status_label_map = {
+            "CONFIRMED": "✅ 手工确认",
+            "AUTO_OK": "🤖 自动识别",
+            "NEED_MANUAL": "⚠️ 待补充",
+            "SKIPPED": "⏭️ 已跳过",
+            "WHITELIST": "📋 白名单",
+            "UNKNOWN": "❓ 未识别",
+        }
+
+        for a in all_audit:
+            status = a.get("status", "UNKNOWN")
+            stype = a.get("sens_type", "-")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            if stype and stype != "-":
+                sens_type_counts[stype] = sens_type_counts.get(stype, 0) + 1
+
+            if status == "CONFIRMED":
+                manual_fields.append(a)
+            elif status == "NEED_MANUAL":
+                need_manual_fields.append(a)
+            elif status == "SKIPPED":
+                skipped_fields.append(a)
+            elif status == "AUTO_OK":
+                auto_fields.append(a)
+
+        review_lines.append("## 📊 快速概览\n")
+        review_lines.append("| 状态 | 字段数 | 说明 |")
+        review_lines.append("|-----|-------|------|")
+        for status in ["CONFIRMED", "AUTO_OK", "NEED_MANUAL", "SKIPPED", "WHITELIST", "UNKNOWN"]:
+            count = status_counts.get(status, 0)
+            if count > 0 or status in ("CONFIRMED", "NEED_MANUAL"):
+                review_lines.append(f"| {status_label_map.get(status, status)} | {count} | |")
+        review_lines.append("")
+
+        review_lines.append("## 📁 处理文件清单\n")
+        for fstat in report.files:
+            review_lines.append(f"### `{os.path.basename(fstat.filepath)}`")
+            review_lines.append(f"- 记录数: {fstat.total_records} | 含敏感记录: {fstat.records_with_sensitive} | 脱敏单元格: {fstat.masked_cells}")
+            file_audit = [a for a in all_audit if a["file"] == os.path.basename(fstat.filepath)]
+            file_sens = [a for a in file_audit if a.get("sens_type") and a.get("sens_type") != "-"]
+            if file_sens:
+                sens_list = ", ".join([f"{TYPE_LABELS.get(a['sens_type'], a['sens_type'])}({a['hit_count']})" for a in file_sens])
+                review_lines.append(f"- 敏感类型: {sens_list}")
+            review_lines.append("")
+
+        if manual_fields:
+            review_lines.append("## ✅ 人工确认字段\n")
+            review_lines.append("> 以下字段已通过手工配置规则，请复核处理口径是否正确：\n")
+            review_lines.append("| 文件 | 字段 | 敏感类型 | 脱敏策略 | 命中数 | 说明 |")
+            review_lines.append("|-----|------|---------|---------|-------|------|")
+            manual_fields.sort(key=lambda x: (x["file"], x["field"]))
+            for a in manual_fields:
+                stype = a.get("sens_type", "-")
+                stype_label = TYPE_LABELS.get(stype, stype) if stype != "-" else "-"
+                review_lines.append(
+                    f"| `{a['file']}` | `{a['field']}` | {stype_label} | {a.get('strategy', '-')} | {a.get('hit_count', 0)} | 人工确认 |"
+                )
+            review_lines.append("")
+
+        if need_manual_fields:
+            review_lines.append("## ⚠️ 待补充规则字段\n")
+            review_lines.append("> 以下字段无法自动识别，请补充配置后再提交审批：\n")
+            review_lines.append("| 文件 | 字段 | 样本值 | 建议 |")
+            review_lines.append("|-----|------|-------|------|")
+            need_manual_fields.sort(key=lambda x: (x["file"], x["field"]))
+            for a in need_manual_fields:
+                sample = str(a.get("sample_original", ""))[:30]
+                review_lines.append(f"| `{a['file']}` | `{a['field']}` | `{sample}` | 请补充 sens_type 和 strategy |")
+            review_lines.append("")
+
+        if auto_fields:
+            review_lines.append("## 🤖 自动识别字段\n")
+            review_lines.append("> 以下字段由系统自动识别，可抽样检查：\n")
+            review_lines.append("| 文件 | 字段 | 敏感类型 | 脱敏策略 | 命中数 |")
+            review_lines.append("|-----|------|---------|---------|-------|")
+            auto_fields.sort(key=lambda x: (x["file"], x["field"]))
+            for a in auto_fields:
+                stype = a.get("sens_type", "-")
+                stype_label = TYPE_LABELS.get(stype, stype) if stype != "-" else "-"
+                review_lines.append(
+                    f"| `{a['file']}` | `{a['field']}` | {stype_label} | {a.get('strategy', '-')} | {a.get('hit_count', 0)} |"
+                )
+            review_lines.append("")
+
+        if skipped_fields:
+            review_lines.append("## ⏭️ 已跳过字段\n")
+            review_lines.append("| 文件 | 字段 | 原因 |")
+            review_lines.append("|-----|------|------|")
+            skipped_fields.sort(key=lambda x: (x["file"], x["field"]))
+            for a in skipped_fields:
+                review_lines.append(f"| `{a['file']}` | `{a['field']}` | 非敏感字段，跳过处理 |")
+            review_lines.append("")
+
+        if sens_type_counts:
+            review_lines.append("## 📈 按敏感类型统计\n")
+            review_lines.append("| 敏感类型 | 字段数 |")
+            review_lines.append("|---------|-------|")
+            for stype, count in sorted(sens_type_counts.items(), key=lambda x: -x[1]):
+                stype_label = TYPE_LABELS.get(stype, stype)
+                review_lines.append(f"| {stype_label} ({stype}) | {count} |")
+            review_lines.append("")
+
+        review_lines.append("## ✅ 复核检查清单\n")
+        review_lines.append("- [ ] 所有 **人工确认字段** 的脱敏策略和敏感类型是否正确？")
+        review_lines.append("- [ ] **待补充字段** 是否已全部配置规则？")
+        review_lines.append("- [ ] 抽样检查脱敏后的数据是否符合预期？")
+        review_lines.append("- [ ] 已跳过字段是否确实为非敏感信息？")
+        review_lines.append("- [ ] 主报告统计数据是否与实际一致？\n")
+
+        review_lines.append("---\n")
+        review_lines.append(f"*生成于 {time.strftime('%Y-%m-%d %H:%M:%S')} by DataMask Tool*")
+
+        with open(review_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(review_lines))
 
         return pkg_root
 
